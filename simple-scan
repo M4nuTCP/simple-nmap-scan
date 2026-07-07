@@ -272,7 +272,9 @@ do_check() {
             reachable=0; note="ruta no resoluble"
         fi
         hr
-        _check_report "$probe" "?" "?" "?" "$is_vpn" "$reachable" "$note"
+        local rec_np; [[ $reachable -eq 0 ]] && rec_np="superbajo" || rec_np="medio"
+        _check_report "$probe" "?" "?" "?" "$is_vpn" "$reachable" "$note" "$rec_np"
+        offer_recommended_run "$rec_np"
         return 0
     fi
 
@@ -298,8 +300,37 @@ do_check() {
     [[ -n "$avg" ]] && rok=1
 
     hr
-    _check_report "$probe" "$loss" "${avg:-?}" "${jit:-?}" "$is_vpn" "$reachable" "$note" \
-        "$(recommend_profile "$loss" "${jit:-0}" "$jok" "${avg:-0}" "$rok" "$is_vpn" "$reachable")"
+    local rec; rec="$(recommend_profile "$loss" "${jit:-0}" "$jok" "${avg:-0}" "$rok" "$is_vpn" "$reachable")"
+    _check_report "$probe" "$loss" "${avg:-?}" "${jit:-?}" "$is_vpn" "$reachable" "$note" "$rec"
+    offer_recommended_run "$rec"
+}
+
+# Tras un --check con -l: ofrece lanzar el escaneo con el perfil recomendado,
+# preguntando el nombre del XML. Si acepta, re-ejecuta simple-scan.
+offer_recommended_run() {
+    local rec="$1"
+    [[ -z "$IP_LIST" ]] && return 0            # solo tiene sentido con una lista
+    local rc; rc="$(color_for_profile "$rec")"
+    printf "  %b¿Ejecutar el escaneo recomendado%b (%b-p %s%b)? %b[y/N]%b " \
+        "$B" "$R" "$rc" "$rec" "$R" "$GREY" "$R"
+    local ans; read -r ans || true
+    case "${ans,,}" in
+        y|yes|s|si) ;;
+        *) echo; warn "De acuerdo, no ejecuto nada."; echo; return 0 ;;
+    esac
+
+    # Nombre del XML de salida (con un valor por defecto derivado de la lista)
+    local base def name
+    base="$(basename "$IP_LIST")"; base="${base%.*}"
+    def="${base:-scan}.xml"
+    printf "  %bNombre del XML de salida%b %b[%s]%b: " "$B" "$R" "$GREY" "$def" "$R"
+    read -r name || true
+    [[ -z "$name" ]] && name="$def"
+    [[ "$name" != *.xml ]] && name="${name}.xml"
+    echo
+
+    # Re-ejecutar el propio simple-scan ya en modo escaneo (con -y, ya confirmado)
+    exec "$0" -l "$IP_LIST" -o "$name" -p "$rec" -y
 }
 
 # Imprime el informe + recomendacion. Args: probe loss avg jit vpn reach note [rec]
@@ -316,12 +347,15 @@ _check_report() {
     hr
     echo -e "  ${B}Perfil recomendado:${R}  ${rc}${B}${rec}${R}  ${GREY}[${PROFILE_RATE[$rec]}]${R}"
     echo -e "  ${GREY}${PROFILE_DESC[$rec]}${R}"
-    echo
-    local ejemplo="simple-scan -l ${IP_LIST:-ips.txt} -o ${OUT_XML:-out.xml} -p ${rec}"
-    echo -e "  ${DIM}Para lanzar el escaneo con esa recomendacion:${R}"
-    echo -e "  ${GRN}\$ ${ejemplo}${R}"
     hr
     echo
+    # Si no hay lista (-l), no se ofrece ejecutar: mostramos el comando sugerido.
+    if [[ -z "$IP_LIST" ]]; then
+        echo -e "  ${DIM}Para lanzar el escaneo con esa recomendacion:${R}"
+        echo -e "  ${GRN}\$ simple-scan -l ips.txt -o out.xml -p ${rec}${R}"
+        hr
+        echo
+    fi
 }
 
 # ===========================================================================

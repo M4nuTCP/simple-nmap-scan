@@ -54,6 +54,10 @@ gateway.
 simple-scan --check -l ips.txt
 ```
 
+Si diste `-l`, al terminar te **pregunta si quieres ejecutar el escaneo con el
+perfil recomendado** y, si aceptas, te pide el **nombre del `.xml`** (con un valor
+por defecto derivado de la lista) y lo lanza directamente.
+
 Habría avisado del problema típico de una **VPN inestable** (que puede tirar el
 escaneo a medias): con VPN, pérdida o jitter alto, recomienda un perfil suave.
 
