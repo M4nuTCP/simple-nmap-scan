@@ -8,10 +8,10 @@ relativamente **rápidos**.
 
 ## Las dos fases
 
-1. **Descubrimiento de puertos** (todos, solo abiertos, SYN, rápido):
+1. **Descubrimiento de puertos** (todos, solo abiertos, SYN, tasa acotada):
 
    ```
-   nmap -p- --open -sS --min-rate 5000 -vvv -n -Pn <ip>
+   nmap -p- --open -sS -T4 --min-rate 1500 --max-rate 3000 -vvv -n -Pn <ip>
    ```
 
 2. **Detección de servicios y versiones** sobre los puertos abiertos encontrados:
@@ -41,12 +41,36 @@ sudo ./scan.sh -l ips.txt -o resultado.xml
 
 ### Parámetros
 
-| Parámetro           | Descripción                                            |
-|---------------------|--------------------------------------------------------|
-| `-l`, `--list`      | Fichero `.txt` con una IP (o rango) por línea.         |
-| `-o`, `--output`    | Nombre del fichero XML de salida.                      |
-| `-r`, `--min-rate`  | Paquetes/seg de la fase 1 (por defecto `5000`).        |
-| `-h`, `--help`      | Ayuda.                                                  |
+| Parámetro           | Descripción                                                    |
+|---------------------|----------------------------------------------------------------|
+| `-l`, `--list`      | Fichero `.txt` con una IP (o rango) por línea.                 |
+| `-o`, `--output`    | Nombre del fichero XML de salida.                             |
+| `-r`, `--min-rate`  | **Suelo** de paquetes/seg de la fase 1 (por defecto `1500`).  |
+| `-R`, `--max-rate`  | **Techo** de paquetes/seg, no lo supera (por defecto `3000`). |
+| `-T`, `--timing`    | Plantilla de timing de nmap `0-5` (por defecto `4`).         |
+| `-h`, `--help`      | Ayuda.                                                        |
+
+### Equilibrio velocidad / carga de red
+
+La idea es ir rápido **sin saturar la trama de red** del objetivo:
+
+- `--min-rate` es el **suelo**: garantiza una velocidad mínima para no eternizarse.
+- `--max-rate` es el **techo**: nmap nunca envía más de esa tasa, así se evita
+  saturar la red o disparar los IDS/IPS.
+- `-T4` es un timing rápido pero razonable.
+
+Ejemplos:
+
+```bash
+# Suave, para producción u objetivos delicados
+./scan.sh -l ips.txt -o out.xml -r 500 -R 1500 -T3
+
+# Por defecto (equilibrado): -r 1500 -R 3000 -T4
+./scan.sh -l ips.txt -o out.xml
+
+# Agresivo, para redes internas que aguanten
+./scan.sh -l ips.txt -o out.xml -r 3000 -R 8000 -T4
+```
 
 ## Fichero de IPs
 

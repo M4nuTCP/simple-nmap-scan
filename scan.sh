@@ -41,10 +41,17 @@ Uso:
   $0 <listado_ips.txt> <salida.xml>
 
 Parametros:
-  -l, --list    Fichero .txt con una IP (o rango) por linea.
-  -o, --output  Nombre del fichero XML de salida.
-  -r, --min-rate  Paquetes/seg de la fase 1 (por defecto 5000).
-  -h, --help    Muestra esta ayuda.
+  -l, --list      Fichero .txt con una IP (o rango) por linea.
+  -o, --output    Nombre del fichero XML de salida.
+  -r, --min-rate  Suelo de paquetes/seg de la fase 1 (por defecto 1500).
+  -R, --max-rate  Techo de paquetes/seg: nunca sube de aqui (por defecto 3000).
+  -T, --timing    Plantilla de timing de nmap 0-5 (por defecto 4).
+  -h, --help      Muestra esta ayuda.
+
+Equilibrio velocidad/carga:
+  --min-rate marca el minimo (para que no vaya lento) y --max-rate el maximo
+  (para no saturar la trama de red). Sube --max-rate en redes que aguanten;
+  bajalo contra objetivos delicados o produccion.
 EOF
 }
 
@@ -53,7 +60,9 @@ EOF
 # ---------------------------------------------------------------------------
 IP_LIST=""
 OUT_XML=""
-MIN_RATE=5000
+MIN_RATE=1500   # suelo: para que no vaya lento
+MAX_RATE=3000   # techo: para no saturar la trama de red
+TIMING=4        # plantilla de timing (0-5); 4 = rapido pero razonable
 
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
@@ -61,6 +70,12 @@ while [[ $# -gt 0 ]]; do
         -l|--list)     IP_LIST="${2:-}"; shift 2 ;;
         -o|--output)   OUT_XML="${2:-}"; shift 2 ;;
         -r|--min-rate) MIN_RATE="${2:-}"; shift 2 ;;
+        -R|--max-rate) MAX_RATE="${2:-}"; shift 2 ;;
+        -T|--timing)   TIMING="${2:-}"; shift 2 ;;
+        # Formas pegadas al estilo nmap: -T4, -r500, -R3000
+        -T[0-5])       TIMING="${1#-T}"; shift ;;
+        -r[0-9]*)      MIN_RATE="${1#-r}"; shift ;;
+        -R[0-9]*)      MAX_RATE="${1#-R}"; shift ;;
         -h|--help)     usage; exit 0 ;;
         -*)            err "Opcion desconocida: $1"; usage; exit 1 ;;
         *)             POSITIONAL+=("$1"); shift ;;
@@ -87,6 +102,12 @@ fi
 
 if ! command -v nmap >/dev/null 2>&1; then
     err "nmap no esta instalado o no esta en el PATH."
+    exit 1
+fi
+
+# El suelo no puede ser mayor que el techo
+if [[ "$MIN_RATE" =~ ^[0-9]+$ && "$MAX_RATE" =~ ^[0-9]+$ && "$MIN_RATE" -gt "$MAX_RATE" ]]; then
+    err "--min-rate ($MIN_RATE) no puede ser mayor que --max-rate ($MAX_RATE)."
     exit 1
 fi
 
@@ -135,11 +156,15 @@ for IP in "${TARGETS[@]}"; do
     banner "[$IDX/${#TARGETS[@]}] Objetivo: ${C_YELLOW}${IP}${C_RESET}"
 
     # ---- FASE 1: descubrimiento de puertos ------------------------------
-    banner "Fase 1 - Descubrimiento de puertos (todos, --open, SYN, rapido)"
-    show_cmd "nmap -p- --open -sS --min-rate ${MIN_RATE} -vvv -n -Pn ${IP} -oG ${D_SCAN}"
-    # -vvv -> interfaz de nmap con triple verbose en pantalla
-    # -oG  -> salida greppable para extraer los puertos de forma fiable
-    nmap -p- --open -sS --min-rate "${MIN_RATE}" -vvv -n -Pn "${IP}" -oG "${D_SCAN}"
+    banner "Fase 1 - Descubrimiento de puertos (todos, --open, SYN, equilibrado)"
+    show_cmd "nmap -p- --open -sS -T${TIMING} --min-rate ${MIN_RATE} --max-rate ${MAX_RATE} -vvv -n -Pn ${IP} -oG ${D_SCAN}"
+    # -T${TIMING}  -> plantilla de timing
+    # --min-rate   -> suelo, para que no vaya lento
+    # --max-rate   -> techo, para no saturar la trama de red
+    # -vvv         -> interfaz de nmap con triple verbose en pantalla
+    # -oG          -> salida greppable para extraer los puertos de forma fiable
+    nmap -p- --open -sS -T"${TIMING}" --min-rate "${MIN_RATE}" --max-rate "${MAX_RATE}" \
+        -vvv -n -Pn "${IP}" -oG "${D_SCAN}"
 
     # ---- Extraer los puertos abiertos -----------------------------------
     # Del fichero greppable sacamos "puerto/open/..." y nos quedamos el numero
@@ -155,8 +180,9 @@ for IP in "${TARGETS[@]}"; do
 
     # ---- FASE 2: scripts por defecto + version --------------------------
     banner "Fase 2 - Deteccion de servicios y versiones (-sCV)"
-    show_cmd "nmap -sCV -p${PORTS} -vvv -n -Pn ${IP} -oX ${X_SCAN}"
-    nmap -sCV -p"${PORTS}" -vvv -n -Pn "${IP}" -oX "${X_SCAN}"
+    show_cmd "nmap -sCV -p${PORTS} -T${TIMING} --max-rate ${MAX_RATE} -vvv -n -Pn ${IP} -oX ${X_SCAN}"
+    # Mismo techo de tasa que la fase 1 para no saturar la red al detectar versiones
+    nmap -sCV -p"${PORTS}" -T"${TIMING}" --max-rate "${MAX_RATE}" -vvv -n -Pn "${IP}" -oX "${X_SCAN}"
 
     XML_PARTS+=("${X_SCAN}")
 done
