@@ -13,11 +13,12 @@
 #
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
-# Origen para --update (se puede sobreescribir por entorno)
+# Origen para --update (se puede sobreescribir por entorno).
+# HEAD = rama por defecto del repo (funciona sea main, master o la que sea).
 REPO_SLUG="${SIMPLE_SCAN_REPO:-M4nuTCP/simple-nmap-scan}"
-REPO_BRANCH="${SIMPLE_SCAN_BRANCH:-main}"
+REPO_BRANCH="${SIMPLE_SCAN_BRANCH:-HEAD}"
 UPDATE_URL="${SIMPLE_SCAN_URL:-https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/simple-scan}"
 
 # ===========================================================================
@@ -89,8 +90,10 @@ do_update() {
     fi
 
     newver="$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)"
-    if [[ -n "$newver" && "$newver" == "$VERSION" ]]; then
-        hr; ok "Ya tienes la ultima version (${B}v${VERSION}${R})."; echo
+    # Comparar por CONTENIDO (no solo por numero de version): si el fichero
+    # descargado es identico al instalado, no hay nada que actualizar.
+    if [[ -f "$target" ]] && cmp -s "$tmp" "$target"; then
+        hr; ok "Ya tienes la ultima version (${B}v${VERSION}${R}) — sin cambios."; echo
         return 0
     fi
 
