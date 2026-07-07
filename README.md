@@ -4,6 +4,11 @@ Escaneo automático en dos fases con nmap sobre una lista de IPs, con salida en 
 único XML. Muestra los comandos, pide confirmación y los ejecuta con triple
 verbose.
 
+Es rápido con muchas IPs: la fase 1 (descubrimiento de puertos) escanea **toda
+la lista en una sola pasada** dejando que nmap paralelice entre hosts, y la
+fase 2 (servicios/versiones) agrupa las IPs por puertos y lanza un escaneo por
+grupo — no una ejecución por IP.
+
 ## Instalación (Debian/Ubuntu)
 
 ```bash

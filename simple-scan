@@ -181,8 +181,8 @@ DFLAGS="${DISC_FLAGS[$PROFILE]}"
 SFLAGS="${SERV_FLAGS[$PROFILE]}"
 
 # Plantillas mostradas al usuario (con marcadores legibles)
-CMD1_PREVIEW="nmap -p- --open -sS ${DFLAGS} -vvv -n -Pn ${B}<objetivo>${R} -oG <tmp.gnmap>"
-CMD2_PREVIEW="nmap -sCV -p${B}<puertos_abiertos>${R} ${SFLAGS} -vvv -n -Pn ${B}<objetivo>${R} -oX <tmp.xml>"
+CMD1_PREVIEW="nmap -iL ${B}<lista>${R} -p- --open -sS ${DFLAGS} -vvv -n -Pn -oG <tmp.gnmap>"
+CMD2_PREVIEW="nmap -sCV -p${B}<puertos>${R} ${SFLAGS} -vvv -n -Pn ${B}<ips_con_esos_puertos>${R} -oX <tmp.xml>"
 
 banner
 echo
@@ -195,12 +195,12 @@ field "Salida"    "${B}${OUT_XML}${R}"
 [[ -n "$ROOT_WARN" ]] && field "Aviso" "${YLW}${ROOT_WARN}${R}"
 hr
 echo
-title "Comandos que se ejecutaran por cada objetivo"
+title "Comandos que se ejecutaran"
 hr
-echo -e "  ${B}${CYN}1.${R} ${DIM}(descubrimiento de puertos)${R}"
+echo -e "  ${B}${CYN}1.${R} ${DIM}(descubrimiento — TODAS las IPs en una sola pasada)${R}"
 echo -e "     ${GRN}${CMD1_PREVIEW}${R}"
 echo
-echo -e "  ${B}${CYN}2.${R} ${DIM}(servicios y versiones sobre los puertos abiertos)${R}"
+echo -e "  ${B}${CYN}2.${R} ${DIM}(servicios y versiones — un escaneo por grupo de puertos)${R}"
 echo -e "     ${GRN}${CMD2_PREVIEW}${R}"
 hr
 echo
@@ -215,48 +215,63 @@ if [[ "$ASSUME_YES" -ne 1 ]]; then
 fi
 
 # ===========================================================================
-#  Ejecucion: dos fases por cada objetivo
+#  Ejecucion
+#    Fase 1: UN solo nmap sobre toda la lista (nmap paraleliza entre hosts).
+#    Fase 2: se agrupan las IPs por conjunto de puertos identico y se lanza
+#            un nmap por grupo (varias IPs en un mismo comando).
 # ===========================================================================
-XML_PARTS=(); IDX=0; START_TS="$(date +%s 2>/dev/null || echo 0)"
+XML_PARTS=(); START_TS="$(date +%s 2>/dev/null || echo 0)"
 
-for IP in "${TARGETS[@]}"; do
-    IDX=$((IDX + 1))
-    SAFE="$(echo "$IP" | tr '/,: ' '____')"
-    D_SCAN="$TMP_DIR/disc_${IDX}_${SAFE}.gnmap"
-    X_SCAN="$TMP_DIR/serv_${IDX}_${SAFE}.xml"
+TARGET_FILE="$TMP_DIR/targets.lst"
+printf '%s\n' "${TARGETS[@]}" > "$TARGET_FILE"
+DISC_GNMAP="$TMP_DIR/discovery.gnmap"
+
+# ---- FASE 1: descubrimiento de TODAS las IPs en una pasada ---------------
+echo
+hr
+title "Fase 1 · Descubrimiento de puertos — ${#TARGETS[@]} IPs en una sola pasada"
+hr
+echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open -sS ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
+echo
+nmap -iL "$TARGET_FILE" -p- --open -sS ${DFLAGS} -vvv -n -Pn -oG "$DISC_GNMAP"
+
+# ---- Agrupar IPs por conjunto de puertos abiertos -----------------------
+declare -A GROUP_TARGETS
+HOSTS_OPEN=0
+while IFS= read -r line; do
+    ip="$(awk '{print $2}' <<<"$line")"
+    ports="$(grep -oE '[0-9]+/open' <<<"$line" | cut -d '/' -f1 | sort -un | paste -sd, -)"
+    [[ -z "$ip" || -z "$ports" ]] && continue
+    HOSTS_OPEN=$((HOSTS_OPEN + 1))
+    GROUP_TARGETS["$ports"]+="${ip} "
+done < <(grep -E '^Host: .*Ports:.*open' "$DISC_GNMAP" 2>/dev/null)
+
+echo
+if [[ ${#GROUP_TARGETS[@]} -eq 0 ]]; then
+    hr
+    warn "Ningun objetivo tenia puertos abiertos: no se genera XML."
+    exit 0
+fi
+ok "Hosts con puertos abiertos: ${GRN}${B}${HOSTS_OPEN}${R}  ·  grupos de puertos: ${B}${#GROUP_TARGETS[@]}${R}"
+
+# ---- FASE 2: un escaneo por grupo de puertos ----------------------------
+GI=0
+for ports in "${!GROUP_TARGETS[@]}"; do
+    GI=$((GI + 1))
+    targets="${GROUP_TARGETS[$ports]}"; targets="${targets% }"   # quitar espacio final
+    n_ips="$(wc -w <<<"$targets")"
+    X_SCAN="$TMP_DIR/serv_${GI}.xml"
 
     echo
     hr
-    title "[${IDX}/${#TARGETS[@]}]  Objetivo: ${PCOL}${IP}${R}"
+    title "Fase 2 · Grupo ${GI}/${#GROUP_TARGETS[@]}  ·  puertos ${PCOL}${ports}${R}  ·  ${n_ips} IP(s)"
     hr
-
-    # ---- FASE 1: descubrimiento de puertos ------------------------------
-    step "  Fase 1 · Descubrimiento de puertos abiertos"
-    echo -e "  ${GRN}\$ nmap -p- --open -sS ${DFLAGS} -vvv -n -Pn ${IP} -oG ${D_SCAN}${R}"
+    info "IPs: ${GREY}${targets}${R}"
+    echo -e "  ${GRN}\$ nmap -sCV -p${ports} ${SFLAGS} -vvv -n -Pn ${targets} -oX ${X_SCAN}${R}"
     echo
-    nmap -p- --open -sS ${DFLAGS} -vvv -n -Pn "${IP}" -oG "${D_SCAN}"
+    nmap -sCV -p"${ports}" ${SFLAGS} -vvv -n -Pn ${targets} -oX "$X_SCAN"
 
-    # ---- Extraer puertos abiertos ---------------------------------------
-    PORTS="$(grep -oE '[0-9]+/open' "${D_SCAN}" 2>/dev/null \
-                | cut -d '/' -f1 | sort -un | xargs | tr ' ' ',')"
-
-    if [[ -z "$PORTS" ]]; then
-        echo
-        warn "Sin puertos abiertos en ${B}${IP}${R} — se omite la fase 2."
-        continue
-    fi
-
-    echo
-    ok "Puertos abiertos en ${IP}: ${GRN}${B}${PORTS}${R}"
-    echo
-
-    # ---- FASE 2: servicios y versiones ----------------------------------
-    step "  Fase 2 · Deteccion de servicios y versiones"
-    echo -e "  ${GRN}\$ nmap -sCV -p${PORTS} ${SFLAGS} -vvv -n -Pn ${IP} -oX ${X_SCAN}${R}"
-    echo
-    nmap -sCV -p"${PORTS}" ${SFLAGS} -vvv -n -Pn "${IP}" -oX "${X_SCAN}"
-
-    XML_PARTS+=("${X_SCAN}")
+    XML_PARTS+=("$X_SCAN")
 done
 
 # ===========================================================================
@@ -286,7 +301,7 @@ ELAPSED=$(( END_TS - START_TS ))
 
 title "Escaneo completado"
 hr
-ok "Hosts con puertos abiertos: ${B}${#XML_PARTS[@]}${R} de ${#TARGETS[@]}"
+ok "Hosts con puertos abiertos: ${B}${HOSTS_OPEN}${R} de ${#TARGETS[@]}"
 ok "XML generado: ${GRN}${B}${OUT_XML}${R}"
 [[ "$ELAPSED" -gt 0 ]] && info "Duracion: ${B}${ELAPSED}s${R}"
 hr
