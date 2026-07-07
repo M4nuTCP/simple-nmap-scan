@@ -1,81 +1,96 @@
-# simple-nmap-scan
+# simple-scan
 
-Script en Bash que automatiza un escaneo en **dos fases** con nmap sobre una
-lista de IPs y genera un único fichero **XML** con el resultado.
+Binario en Bash que automatiza un escaneo **en dos fases** con nmap sobre una
+lista de IPs y genera un único **XML** combinado. Pensado para auditorías de
+muchas IPs: comandos **no intrusivos** (no rompen webs) y con un equilibrio
+afinado entre **velocidad** y **no saturar la trama de red**.
 
-Está pensado para muchas IPs: usa comandos **no intrusivos** (no rompen webs) y
-relativamente **rápidos**.
+```
+simple-scan -l ips.txt -o out.xml -p medio
+```
 
 ## Las dos fases
 
-1. **Descubrimiento de puertos** (todos, solo abiertos, SYN, tasa acotada):
+1. **Descubrimiento de puertos** — todos los puertos, solo abiertos, SYN scan
+   (no llega a la capa de aplicación, no toca la web):
 
    ```
-   nmap -p- --open -sS -T4 --min-rate 1500 --max-rate 3000 -vvv -n -Pn <ip>
+   nmap -p- --open -sS <ajuste-del-perfil> -vvv -n -Pn <ip> -oG <tmp>
    ```
 
-2. **Detección de servicios y versiones** sobre los puertos abiertos encontrados:
+2. **Servicios y versiones** — solo sobre los puertos abiertos encontrados:
 
    ```
-   nmap -sCV -p<puertosAbiertos> <ip>
+   nmap -sCV -p<puertos_abiertos> <ajuste-del-perfil> -vvv -n -Pn <ip> -oX <tmp>
    ```
 
-En todo momento se ve por pantalla el comando exacto que se lanza y la salida de
-nmap con triple verbose (`-vvv`).
+En todo momento se ve el comando exacto lanzado y la salida de nmap con **triple
+verbose** (`-vvv`).
+
+## Perfiles
+
+El equilibrio velocidad / carga de red se elige con `-p`:
+
+| Perfil       | Idea                                                        | Velocidad |
+|--------------|-------------------------------------------------------------|-----------|
+| `bajo`       | **Super seguro**: no tumba redes frágiles. Tarda algo más.  | 🐢        |
+| `medio` ⭐   | **Sintonía perfecta**: rápido sin saturar. Por defecto.     | ⚖️        |
+| `agresivo`   | **Más rápido** pero acotado (sin `-T5` a lo loco).          | 🚀        |
+
+La clave para no saturar es acotar la tasa con `--max-rate` (techo) en todos los
+perfiles, y ajustar `-T`, reintentos y paralelismo según el perfil. `bajo` usa
+timing educado y un techo bajo; `agresivo` sube el techo pero sigue estando
+limitado.
+
+## Instalación (Debian/Ubuntu)
+
+Instálalo como binario del sistema con el script `setup`:
+
+```bash
+sudo ./setup            # instala en /usr/local/bin/simple-scan y comprueba nmap
+sudo ./setup uninstall  # lo elimina
+```
+
+También hay `Makefile`:
+
+```bash
+sudo make install
+sudo make uninstall
+```
+
+El instalador comprueba la dependencia **nmap** (y la instala con `apt` si falta)
+y deja `simple-scan` disponible en el `PATH`.
 
 ## Uso
 
 ```bash
-# Con flags
-./scan.sh -l ips.txt -o resultado.xml
-
-# O con parametros posicionales: primero la lista, luego el nombre del XML
-./scan.sh ips.txt resultado.xml
+simple-scan -l <ips.txt> -o <salida.xml> [-p <perfil>] [-y]
 ```
 
-Para el escaneo SYN (`-sS`) hacen falta privilegios, así que normalmente:
+| Parámetro          | Descripción                                             |
+|--------------------|---------------------------------------------------------|
+| `-l`, `--list`     | Fichero `.txt` con una IP (o rango) por línea.          |
+| `-o`, `--output`   | Nombre del fichero XML de salida.                       |
+| `-p`, `--profile`  | `bajo` \| `medio` \| `agresivo` (por defecto `medio`).  |
+| `-y`, `--yes`      | No preguntar confirmación, ejecutar directamente.       |
+| `-h`, `--help`     | Ayuda.                                                  |
 
-```bash
-sudo ./scan.sh -l ips.txt -o resultado.xml
+### Flujo
+
+Al ejecutar, primero se muestran **los dos comandos** que se van a lanzar
+(numerados `1.` y `2.`) y un resumen del escaneo, y se pide **confirmación**:
+
+```
+  ¿Ejecutar el escaneo? [y/N]
 ```
 
-### Parámetros
-
-| Parámetro           | Descripción                                                    |
-|---------------------|----------------------------------------------------------------|
-| `-l`, `--list`      | Fichero `.txt` con una IP (o rango) por línea.                 |
-| `-o`, `--output`    | Nombre del fichero XML de salida.                             |
-| `-r`, `--min-rate`  | **Suelo** de paquetes/seg de la fase 1 (por defecto `1500`).  |
-| `-R`, `--max-rate`  | **Techo** de paquetes/seg, no lo supera (por defecto `3000`). |
-| `-T`, `--timing`    | Plantilla de timing de nmap `0-5` (por defecto `4`).         |
-| `-h`, `--help`      | Ayuda.                                                        |
-
-### Equilibrio velocidad / carga de red
-
-La idea es ir rápido **sin saturar la trama de red** del objetivo:
-
-- `--min-rate` es el **suelo**: garantiza una velocidad mínima para no eternizarse.
-- `--max-rate` es el **techo**: nmap nunca envía más de esa tasa, así se evita
-  saturar la red o disparar los IDS/IPS.
-- `-T4` es un timing rápido pero razonable.
-
-Ejemplos:
-
-```bash
-# Suave, para producción u objetivos delicados
-./scan.sh -l ips.txt -o out.xml -r 500 -R 1500 -T3
-
-# Por defecto (equilibrado): -r 1500 -R 3000 -T4
-./scan.sh -l ips.txt -o out.xml
-
-# Agresivo, para redes internas que aguanten
-./scan.sh -l ips.txt -o out.xml -r 3000 -R 8000 -T4
-```
+Pulsando `y` arranca y se ve todo por pantalla con triple verbose. Con `-y` se
+salta la confirmación.
 
 ## Fichero de IPs
 
-Una IP por línea. Se ignoran líneas vacías y comentarios (`#`). Se admite la
-sintaxis de nmap para varias IPs en una línea, por ejemplo `10.10.0.20,21,22,23,24`.
+Una IP por línea. Se ignoran líneas vacías y comentarios (`#`). Admite la
+sintaxis de nmap para varias IPs en una línea (`10.10.0.20,21,22,23,24`).
 
 ```
 10.10.0.10
@@ -85,6 +100,10 @@ sintaxis de nmap para varias IPs en una línea, por ejemplo `10.10.0.20,21,22,23
 
 ## Salida
 
-Se genera un único `.xml` combinando el resultado de la fase 2 de todos los
-objetivos con puertos abiertos. Los objetivos sin puertos abiertos se omiten de
-la fase 2.
+Un único `.xml` que combina el resultado de la fase 2 de todos los objetivos con
+puertos abiertos. Los objetivos sin puertos abiertos se omiten de la fase 2.
+
+## Aviso legal
+
+Úsalo solo contra sistemas de tu propiedad o con **autorización por escrito**. El
+escaneo de puertos sin permiso puede ser ilegal.

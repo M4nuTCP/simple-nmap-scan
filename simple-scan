@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+#
+#  simple-scan - Escaneo automatico en dos fases con nmap
+#  ------------------------------------------------------------------
+#  Fase 1  Descubrimiento de puertos abiertos (rapido, no intrusivo)
+#  Fase 2  Deteccion de servicios/versiones sobre los puertos abiertos
+#
+#  Lee una lista de IPs desde un .txt y genera un unico XML combinado.
+#  Tres perfiles de intensidad: bajo | medio | agresivo.
+#
+#  Uso:
+#     simple-scan -l ips.txt -o out.xml -p medio
+#
+set -euo pipefail
+
+VERSION="1.0.0"
+
+# ===========================================================================
+#  Estetica
+# ===========================================================================
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    B="\033[1m"; DIM="\033[2m"; R="\033[0m"
+    RED="\033[38;5;203m"; GRN="\033[38;5;114m"; YLW="\033[38;5;221m"
+    BLU="\033[38;5;75m";  CYN="\033[38;5;80m";  MAG="\033[38;5;176m"
+    GREY="\033[38;5;245m"
+else
+    B=""; DIM=""; R=""; RED=""; GRN=""; YLW=""; BLU=""; CYN=""; MAG=""; GREY=""
+fi
+
+# Anchura de las lineas decorativas
+LINE="────────────────────────────────────────────────────────────"
+
+hr()      { echo -e "${GREY}${LINE}${R}"; }
+title()   { echo -e "${B}${BLU}$*${R}"; }
+step()    { echo -e "${B}${MAG}$*${R}"; }
+info()    { echo -e "  ${CYN}•${R} $*"; }
+ok()      { echo -e "  ${GRN}✔${R} $*"; }
+warn()    { echo -e "  ${YLW}!${R} $*"; }
+err()     { echo -e "${RED}✖${R} $*" >&2; }
+field()   { printf "  ${GREY}%-10s${R} %b\n" "$1" "$2"; }
+
+banner() {
+    local w=58
+    local plain="  simple-scan v${VERSION}   ·   escaneo nmap en dos fases"
+    local pad=$(( w - ${#plain} )); (( pad < 0 )) && pad=0
+    local bar; bar="$(printf '%.0s─' $(seq 1 "$w"))"
+    echo
+    echo -e "${BLU}╭${bar}╮${R}"
+    echo -e "${BLU}│${R}  ${B}simple-scan${R} ${GREY}v${VERSION}${R}   ${DIM}·${R}   ${DIM}escaneo nmap en dos fases${R}$(printf '%*s' "$pad" '')${BLU}│${R}"
+    echo -e "${BLU}╰${bar}╯${R}"
+}
+
+# ===========================================================================
+#  Perfiles  (flags de AJUSTE que se anaden a los comandos base de nmap)
+#  Base fase 1:  nmap -p- --open -sS -vvv -n -Pn <ip> -oG <f>
+#  Base fase 2:  nmap -sCV -p<puertos> -vvv -n -Pn <ip> -oX <f>
+#
+#  Los valores definitivos se ajustan tras la investigacion; estos son
+#  puntos de partida sensatos:
+#    bajo     -> super seguro, mas lento, no tumba redes fragiles
+#    medio    -> sintonia perfecta velocidad / no saturar (por defecto)
+#    agresivo -> mas rapido, pero acotado (sin -T5 a lo loco)
+# ===========================================================================
+declare -A DISC_FLAGS SERV_FLAGS PROFILE_DESC
+
+DISC_FLAGS[bajo]="-T2 --max-rate 500 --max-retries 3 --max-hostgroup 16 --host-timeout 30m"
+SERV_FLAGS[bajo]="-T2 --max-rate 500 --version-intensity 4 --host-timeout 20m"
+PROFILE_DESC[bajo]="super seguro (lento) — no satura redes fragiles"
+
+DISC_FLAGS[medio]="-T4 --min-rate 1500 --max-rate 3000 --max-retries 2 --host-timeout 20m"
+SERV_FLAGS[medio]="-T4 --max-rate 3000 --host-timeout 15m"
+PROFILE_DESC[medio]="sintonia perfecta velocidad / no saturar (por defecto)"
+
+DISC_FLAGS[agresivo]="-T4 --min-rate 5000 --max-rate 10000 --max-retries 1 --min-hostgroup 64 --host-timeout 15m"
+SERV_FLAGS[agresivo]="-T4 --max-rate 10000 --version-light --host-timeout 12m"
+PROFILE_DESC[agresivo]="mas rapido pero acotado (no a lo loco)"
+
+# ===========================================================================
+#  Ayuda
+# ===========================================================================
+usage() {
+    banner
+    cat <<EOF
+
+${B}USO${R}
+  simple-scan -l <ips.txt> -o <salida.xml> [-p <perfil>] [-y]
+
+${B}PARAMETROS${R}
+  -l, --list      Fichero .txt con una IP (o rango) por linea.
+  -o, --output    Nombre del fichero XML de salida.
+  -p, --profile   Perfil de intensidad: bajo | medio | agresivo  (def: medio)
+  -y, --yes       No preguntar confirmacion, ejecutar directamente.
+  -h, --help      Esta ayuda.
+      --version   Version.
+
+${B}PERFILES${R}
+  ${GRN}bajo${R}      ${PROFILE_DESC[bajo]}
+  ${YLW}medio${R}     ${PROFILE_DESC[medio]}
+  ${RED}agresivo${R}  ${PROFILE_DESC[agresivo]}
+
+${B}EJEMPLO${R}
+  simple-scan -l ips.txt -o out.xml -p medio
+EOF
+    echo
+}
+
+# ===========================================================================
+#  Parseo de argumentos
+# ===========================================================================
+IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -l|--list)    IP_LIST="${2:-}"; shift 2 ;;
+        -o|--output)  OUT_XML="${2:-}"; shift 2 ;;
+        -p|--profile) PROFILE="${2:-}"; shift 2 ;;
+        -y|--yes)     ASSUME_YES=1; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        --version)    echo "simple-scan v${VERSION}"; exit 0 ;;
+        -*)           err "Opcion desconocida: $1"; echo "Prueba: simple-scan --help" >&2; exit 1 ;;
+        *)            POSITIONAL+=("$1"); shift ;;
+    esac
+done
+
+[[ -z "$IP_LIST" && ${#POSITIONAL[@]} -ge 1 ]] && IP_LIST="${POSITIONAL[0]}"
+[[ -z "$OUT_XML" && ${#POSITIONAL[@]} -ge 2 ]] && OUT_XML="${POSITIONAL[1]}"
+
+# ===========================================================================
+#  Validaciones
+# ===========================================================================
+[[ -z "$IP_LIST" || -z "$OUT_XML" ]] && { err "Faltan parametros (-l y -o son obligatorios)."; echo "Prueba: simple-scan --help" >&2; exit 1; }
+[[ ! -f "$IP_LIST" ]] && { err "No existe el fichero de IPs: ${B}${IP_LIST}${R}"; exit 1; }
+
+if [[ -z "${DISC_FLAGS[$PROFILE]:-}" ]]; then
+    err "Perfil desconocido: ${B}${PROFILE}${R}"
+    echo -e "   Perfiles validos: ${GRN}bajo${R} | ${YLW}medio${R} | ${RED}agresivo${R}" >&2
+    exit 1
+fi
+
+command -v nmap >/dev/null 2>&1 || { err "nmap no esta instalado. Instala con: ${B}sudo apt install nmap${R}"; exit 1; }
+
+# Extension .xml
+[[ "$OUT_XML" != *.xml ]] && OUT_XML="${OUT_XML}.xml"
+
+# Aviso si no somos root (-sS necesita privilegios)
+ROOT_WARN=""
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    ROOT_WARN="sin root: -sS (SYN) requiere privilegios; usa ${B}sudo${R} o nmap caera a connect scan (-sT)"
+fi
+
+# Directorio temporal
+TMP_DIR="$(mktemp -d)"
+cleanup() { rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
+
+# Cargar objetivos (ignora vacias y comentarios #)
+mapfile -t TARGETS < <(sed 's/#.*//' "$IP_LIST" | awk '{$1=$1};1' | grep -v '^$')
+[[ ${#TARGETS[@]} -eq 0 ]] && { err "El fichero ${B}${IP_LIST}${R} no contiene IPs validas."; exit 1; }
+
+# Color del perfil para la UI
+case "$PROFILE" in
+    bajo)     PCOL="$GRN" ;;
+    medio)    PCOL="$YLW" ;;
+    agresivo) PCOL="$RED" ;;
+esac
+
+# ===========================================================================
+#  Vista previa de los comandos + confirmacion
+# ===========================================================================
+DFLAGS="${DISC_FLAGS[$PROFILE]}"
+SFLAGS="${SERV_FLAGS[$PROFILE]}"
+
+# Plantillas mostradas al usuario (con marcadores legibles)
+CMD1_PREVIEW="nmap -p- --open -sS ${DFLAGS} -vvv -n -Pn ${B}<objetivo>${R} -oG <tmp.gnmap>"
+CMD2_PREVIEW="nmap -sCV -p${B}<puertos_abiertos>${R} ${SFLAGS} -vvv -n -Pn ${B}<objetivo>${R} -oX <tmp.xml>"
+
+banner
+echo
+title "Resumen del escaneo"
+hr
+field "Perfil"    "${PCOL}${B}${PROFILE}${R}  ${GREY}${PROFILE_DESC[$PROFILE]}${R}"
+field "Objetivos" "${B}${#TARGETS[@]}${R}  ${GREY}(desde ${IP_LIST})${R}"
+field "Salida"    "${B}${OUT_XML}${R}"
+[[ -n "$ROOT_WARN" ]] && field "Aviso" "${YLW}${ROOT_WARN}${R}"
+hr
+echo
+title "Comandos que se ejecutaran por cada objetivo"
+hr
+echo -e "  ${B}${CYN}1.${R} ${DIM}(descubrimiento de puertos)${R}"
+echo -e "     ${GRN}${CMD1_PREVIEW}${R}"
+echo
+echo -e "  ${B}${CYN}2.${R} ${DIM}(servicios y versiones sobre los puertos abiertos)${R}"
+echo -e "     ${GRN}${CMD2_PREVIEW}${R}"
+hr
+echo
+
+if [[ "$ASSUME_YES" -ne 1 ]]; then
+    printf "  %b¿Ejecutar el escaneo?%b %s[y/N]%s " "$B" "$R" "$GREY" "$R"
+    read -r answer || true
+    case "${answer,,}" in
+        y|yes|s|si) echo ;;
+        *) echo; warn "Cancelado."; exit 0 ;;
+    esac
+fi
+
+# ===========================================================================
+#  Ejecucion: dos fases por cada objetivo
+# ===========================================================================
+XML_PARTS=(); IDX=0; START_TS="$(date +%s 2>/dev/null || echo 0)"
+
+for IP in "${TARGETS[@]}"; do
+    IDX=$((IDX + 1))
+    SAFE="$(echo "$IP" | tr '/,: ' '____')"
+    D_SCAN="$TMP_DIR/disc_${IDX}_${SAFE}.gnmap"
+    X_SCAN="$TMP_DIR/serv_${IDX}_${SAFE}.xml"
+
+    echo
+    hr
+    title "[${IDX}/${#TARGETS[@]}]  Objetivo: ${PCOL}${IP}${R}"
+    hr
+
+    # ---- FASE 1: descubrimiento de puertos ------------------------------
+    step "  Fase 1 · Descubrimiento de puertos abiertos"
+    echo -e "  ${GRN}\$ nmap -p- --open -sS ${DFLAGS} -vvv -n -Pn ${IP} -oG ${D_SCAN}${R}"
+    echo
+    nmap -p- --open -sS ${DFLAGS} -vvv -n -Pn "${IP}" -oG "${D_SCAN}"
+
+    # ---- Extraer puertos abiertos ---------------------------------------
+    PORTS="$(grep -oE '[0-9]+/open' "${D_SCAN}" 2>/dev/null \
+                | cut -d '/' -f1 | sort -un | xargs | tr ' ' ',')"
+
+    if [[ -z "$PORTS" ]]; then
+        echo
+        warn "Sin puertos abiertos en ${B}${IP}${R} — se omite la fase 2."
+        continue
+    fi
+
+    echo
+    ok "Puertos abiertos en ${IP}: ${GRN}${B}${PORTS}${R}"
+    echo
+
+    # ---- FASE 2: servicios y versiones ----------------------------------
+    step "  Fase 2 · Deteccion de servicios y versiones"
+    echo -e "  ${GRN}\$ nmap -sCV -p${PORTS} ${SFLAGS} -vvv -n -Pn ${IP} -oX ${X_SCAN}${R}"
+    echo
+    nmap -sCV -p"${PORTS}" ${SFLAGS} -vvv -n -Pn "${IP}" -oX "${X_SCAN}"
+
+    XML_PARTS+=("${X_SCAN}")
+done
+
+# ===========================================================================
+#  Combinar los XML de la fase 2 en un unico fichero
+# ===========================================================================
+echo
+hr
+if [[ ${#XML_PARTS[@]} -eq 0 ]]; then
+    warn "Ningun objetivo tenia puertos abiertos: no se genera XML."
+    exit 0
+fi
+
+FIRST="${XML_PARTS[0]}"; LAST="${XML_PARTS[${#XML_PARTS[@]}-1]}"
+{
+    # Cabecera hasta el primer <host>
+    awk 'BEGIN{p=1} /<host[ >]/{p=0} p{print}' "$FIRST"
+    # Todos los bloques <host>...</host>
+    for f in "${XML_PARTS[@]}"; do
+        awk '/<host[ >]/{c=1} c{print} /<\/host>/{c=0}' "$f"
+    done
+    # Runstats + cierre del ultimo
+    awk '/<runstats>/{p=1} p{print}' "$LAST"
+} > "$OUT_XML"
+
+END_TS="$(date +%s 2>/dev/null || echo 0)"
+ELAPSED=$(( END_TS - START_TS ))
+
+title "Escaneo completado"
+hr
+ok "Hosts con puertos abiertos: ${B}${#XML_PARTS[@]}${R} de ${#TARGETS[@]}"
+ok "XML generado: ${GRN}${B}${OUT_XML}${R}"
+[[ "$ELAPSED" -gt 0 ]] && info "Duracion: ${B}${ELAPSED}s${R}"
+hr
+echo

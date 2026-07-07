@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+#
+#  setup - Instalador de simple-scan para Debian/Ubuntu
+#  ------------------------------------------------------------------
+#  Instala 'simple-scan' como binario del sistema en /usr/local/bin,
+#  comprueba la dependencia 'nmap' y ofrece desinstalacion.
+#
+#  Uso:
+#     sudo ./setup            # instalar
+#     sudo ./setup install    # instalar
+#     sudo ./setup uninstall  # desinstalar
+#
+set -euo pipefail
+
+# --- Estetica --------------------------------------------------------------
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    B="\033[1m"; R="\033[0m"; GRN="\033[38;5;114m"; RED="\033[38;5;203m"
+    YLW="\033[38;5;221m"; BLU="\033[38;5;75m"; GREY="\033[38;5;245m"
+else
+    B=""; R=""; GRN=""; RED=""; YLW=""; BLU=""; GREY=""
+fi
+ok()   { echo -e "  ${GRN}✔${R} $*"; }
+info() { echo -e "  ${BLU}•${R} $*"; }
+warn() { echo -e "  ${YLW}!${R} $*"; }
+err()  { echo -e "${RED}✖${R} $*" >&2; }
+
+# --- Config ----------------------------------------------------------------
+BIN_NAME="simple-scan"
+PREFIX="${PREFIX:-/usr/local}"
+BIN_DIR="${PREFIX}/bin"
+DEST="${BIN_DIR}/${BIN_NAME}"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${SRC_DIR}/${BIN_NAME}"
+
+ACTION="${1:-install}"
+
+require_root() {
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        err "Se necesitan privilegios de root."
+        echo -e "   Ejecuta:  ${B}sudo ./setup ${ACTION}${R}" >&2
+        exit 1
+    fi
+}
+
+ensure_nmap() {
+    if command -v nmap >/dev/null 2>&1; then
+        ok "Dependencia presente: nmap ($(nmap --version | head -1 | awk '{print $3}'))"
+        return
+    fi
+    warn "nmap no esta instalado (es imprescindible)."
+    if command -v apt-get >/dev/null 2>&1; then
+        info "Instalando nmap con apt-get..."
+        apt-get update -qq && apt-get install -y nmap
+        ok "nmap instalado."
+    else
+        err "No encuentro apt-get. Instala nmap manualmente y reintenta."
+        exit 1
+    fi
+}
+
+do_install() {
+    echo
+    echo -e "${B}${BLU}Instalando ${BIN_NAME}${R}"
+    echo -e "${GREY}────────────────────────────────────────────${R}"
+    require_root
+
+    [[ -f "$SRC" ]] || { err "No encuentro el script fuente: ${B}${SRC}${R}"; exit 1; }
+
+    ensure_nmap
+
+    install -d "$BIN_DIR"
+    install -m 0755 "$SRC" "$DEST"
+    ok "Instalado en ${B}${DEST}${R}"
+
+    if command -v "$BIN_NAME" >/dev/null 2>&1; then
+        ok "Disponible en el PATH: ${B}$(command -v "$BIN_NAME")${R}"
+    else
+        warn "${BIN_DIR} no parece estar en tu PATH. Anade:  export PATH=\"${BIN_DIR}:\$PATH\""
+    fi
+
+    echo -e "${GREY}────────────────────────────────────────────${R}"
+    ok "${B}Listo.${R} Prueba:  ${B}${BIN_NAME} --help${R}"
+    echo
+}
+
+do_uninstall() {
+    echo
+    echo -e "${B}${BLU}Desinstalando ${BIN_NAME}${R}"
+    echo -e "${GREY}────────────────────────────────────────────${R}"
+    require_root
+    if [[ -e "$DEST" ]]; then
+        rm -f "$DEST"
+        ok "Eliminado ${B}${DEST}${R}"
+    else
+        warn "No estaba instalado en ${DEST}."
+    fi
+    info "nmap NO se desinstala (puede que lo uses para otras cosas)."
+    echo
+}
+
+case "$ACTION" in
+    install)   do_install ;;
+    uninstall) do_uninstall ;;
+    -h|--help|help)
+        echo "Uso: sudo ./setup [install|uninstall]"
+        ;;
+    *)
+        err "Accion desconocida: ${ACTION}"
+        echo "Uso: sudo ./setup [install|uninstall]" >&2
+        exit 1
+        ;;
+esac
