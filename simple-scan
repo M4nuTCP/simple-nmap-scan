@@ -206,7 +206,7 @@ hr
 echo
 
 if [[ "$ASSUME_YES" -ne 1 ]]; then
-    printf "  %b¿Ejecutar el escaneo?%b %s[y/N]%s " "$B" "$R" "$GREY" "$R"
+    printf "  %b¿Ejecutar el escaneo?%b %b[y/N]%b " "$B" "$R" "$GREY" "$R"
     read -r answer || true
     case "${answer,,}" in
         y|yes|s|si) echo ;;
