@@ -1,0 +1,6 @@
+# Un objetivo por linea. Se admiten IPs, rangos y listas de nmap.
+# Las lineas vacias y las que empiezan por # se ignoran.
+10.10.0.10
+10.10.0.11
+# Ejemplo de varias IPs en una sola linea (sintaxis nmap):
+# 10.10.0.20,21,22,23,24
