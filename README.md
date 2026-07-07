@@ -33,6 +33,14 @@ simple-scan -l ips.txt -o out.xml -p medio
 Al lanzarlo muestra los dos comandos de nmap que se van a ejecutar y pregunta
 `¿Ejecutar el escaneo? [y/N]`. Con `y` arranca.
 
+**Ejecuta con `sudo`** para el escaneo óptimo: el SYN scan (`-sS`) necesita
+privilegios de root. Sin `sudo`, se avisa y se usa `-sT` (connect scan), que
+funciona igual pero es más lento y ruidoso.
+
+```bash
+sudo simple-scan -l ips.txt -o out.xml -p medio
+```
+
 ## Perfiles
 
 Controlan el equilibrio entre velocidad y no saturar la red escaneada. El techo

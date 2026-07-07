@@ -214,10 +214,17 @@ command -v nmap >/dev/null 2>&1 || { err "nmap no esta instalado. Instala con: $
 # Extension .xml
 [[ "$OUT_XML" != *.xml ]] && OUT_XML="${OUT_XML}.xml"
 
-# Aviso si no somos root (-sS necesita privilegios)
+# Tipo de escaneo de la fase 1: -sS (SYN) necesita root.
+# Sin root, nmap -sS NO hace fallback: sale con error. Usamos -sT (connect),
+# que si funciona sin privilegios, y avisamos.
 ROOT_WARN=""
-if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    ROOT_WARN="sin root: -sS (SYN) requiere privilegios; usa ${B}sudo${R} o nmap caera a connect scan (-sT)"
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    SCAN_TYPE="-sS"
+    SCAN_DESC="SYN scan (-sS)"
+else
+    SCAN_TYPE="-sT"
+    SCAN_DESC="connect scan (-sT)"
+    ROOT_WARN="No estas usando ${B}sudo${R}: el SYN scan ${B}-sS${R} necesita privilegios de root y no se incluira. Se usara ${B}-sT${R} (connect scan), que funciona sin sudo pero es mas lento y ruidoso. Para el escaneo optimo: ${B}sudo simple-scan ...${R}"
 fi
 
 # Directorio temporal
@@ -243,7 +250,7 @@ DFLAGS="${DISC_FLAGS[$PROFILE]}"
 SFLAGS="${SERV_FLAGS[$PROFILE]}"
 
 # Plantillas mostradas al usuario (con marcadores legibles)
-CMD1_PREVIEW="nmap -iL ${B}<lista>${R} -p- --open -sS ${DFLAGS} -vvv -n -Pn -oG <tmp.gnmap>"
+CMD1_PREVIEW="nmap -iL ${B}<lista>${R} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG <tmp.gnmap>"
 CMD2_PREVIEW="nmap -sCV -p${B}<puertos>${R} ${SFLAGS} -vvv -n -Pn ${B}<ips_con_esos_puertos>${R} -oX <tmp.xml>"
 
 banner
@@ -252,9 +259,9 @@ title "Resumen del escaneo"
 hr
 field "Perfil"    "${PCOL}${B}${PROFILE}${R}  ${GREY}${PROFILE_DESC[$PROFILE]}${R}"
 field "Tasa"      "${B}${PROFILE_RATE[$PROFILE]}${R}  ${GREY}(techo con --max-rate)${R}"
+field "Escaneo"   "${B}${SCAN_DESC}${R}"
 field "Objetivos" "${B}${#TARGETS[@]}${R}  ${GREY}(desde ${IP_LIST})${R}"
 field "Salida"    "${B}${OUT_XML}${R}"
-[[ -n "$ROOT_WARN" ]] && field "Aviso" "${YLW}${ROOT_WARN}${R}"
 hr
 echo
 title "Comandos que se ejecutaran"
@@ -266,6 +273,12 @@ echo -e "  ${B}${CYN}2.${R} ${DIM}(servicios y versiones — un escaneo por grup
 echo -e "     ${GRN}${CMD2_PREVIEW}${R}"
 hr
 echo
+
+# Aviso prominente si no hay sudo
+if [[ -n "$ROOT_WARN" ]]; then
+    warn "$ROOT_WARN"
+    echo
+fi
 
 if [[ "$ASSUME_YES" -ne 1 ]]; then
     printf "  %b¿Ejecutar el escaneo?%b %b[y/N]%b " "$B" "$R" "$GREY" "$R"
@@ -293,9 +306,9 @@ echo
 hr
 title "Fase 1 · Descubrimiento de puertos — ${#TARGETS[@]} IPs en una sola pasada"
 hr
-echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open -sS ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
+echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
 echo
-nmap -iL "$TARGET_FILE" -p- --open -sS ${DFLAGS} -vvv -n -Pn -oG "$DISC_GNMAP"
+nmap -iL "$TARGET_FILE" -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG "$DISC_GNMAP"
 
 # ---- Agrupar IPs por conjunto de puertos abiertos -----------------------
 declare -A GROUP_TARGETS
