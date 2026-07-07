@@ -214,17 +214,26 @@ command -v nmap >/dev/null 2>&1 || { err "nmap no esta instalado. Instala con: $
 # Extension .xml
 [[ "$OUT_XML" != *.xml ]] && OUT_XML="${OUT_XML}.xml"
 
-# Tipo de escaneo de la fase 1: -sS (SYN) necesita root.
-# Sin root, nmap -sS NO hace fallback: sale con error. Usamos -sT (connect),
-# que si funciona sin privilegios, y avisamos.
-ROOT_WARN=""
+# Tipo de escaneo de la fase 1: -sS (SYN) necesita privilegios (sockets raw).
+# Se puede si somos root O si el binario nmap tiene la capability cap_net_raw.
+# Sin ninguna de las dos, nmap -sS NO hace fallback: sale con error. En ese
+# caso usamos -sT (connect scan), que funciona sin privilegios, y avisamos.
+CAN_SYN=0
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    CAN_SYN=1
+elif command -v getcap >/dev/null 2>&1; then
+    NMAP_REAL="$(readlink -f "$(command -v nmap)" 2>/dev/null || command -v nmap)"
+    getcap "$NMAP_REAL" 2>/dev/null | grep -qi 'cap_net_raw' && CAN_SYN=1
+fi
+
+ROOT_WARN=""
+if [[ "$CAN_SYN" -eq 1 ]]; then
     SCAN_TYPE="-sS"
     SCAN_DESC="SYN scan (-sS)"
 else
     SCAN_TYPE="-sT"
     SCAN_DESC="connect scan (-sT)"
-    ROOT_WARN="No estas usando ${B}sudo${R}: el SYN scan ${B}-sS${R} necesita privilegios de root y no se incluira. Se usara ${B}-sT${R} (connect scan), que funciona sin sudo pero es mas lento y ruidoso. Para el escaneo optimo: ${B}sudo simple-scan ...${R}"
+    ROOT_WARN="Sin privilegios para SYN scan: ${B}-sS${R} necesita root (o nmap con cap_net_raw) y no se incluira. Se usara ${B}-sT${R} (connect scan), que funciona sin sudo pero es mas lento y ruidoso. Para el escaneo optimo: ${B}sudo simple-scan ...${R}"
 fi
 
 # Directorio temporal
@@ -308,7 +317,19 @@ title "Fase 1 · Descubrimiento de puertos — ${#TARGETS[@]} IPs en una sola pa
 hr
 echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
 echo
+set +e
 nmap -iL "$TARGET_FILE" -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG "$DISC_GNMAP"
+NMAP_RC=$?
+set -e
+if [[ $NMAP_RC -ne 0 ]]; then
+    echo
+    hr
+    err "La fase 1 termino con error (nmap salio con codigo ${NMAP_RC})."
+    warn "Mensajes como ${B}'No such device'${R} o ${B}'The interface disappeared'${R} indican que"
+    warn "la interfaz de red (a menudo una ${B}VPN${R}) se cayo durante el escaneo:"
+    warn "es un problema de ${B}RED${R}, no del script. Revisa la conexion/VPN y reintenta."
+    info "Continuo con los resultados ${B}parciales${R} que haya en el descubrimiento..."
+fi
 
 # ---- Agrupar IPs por conjunto de puertos abiertos -----------------------
 declare -A GROUP_TARGETS
@@ -344,9 +365,16 @@ for ports in "${!GROUP_TARGETS[@]}"; do
     info "IPs: ${GREY}${targets}${R}"
     echo -e "  ${GRN}\$ nmap -sCV -p${ports} ${SFLAGS} -vvv -n -Pn ${targets} -oX ${X_SCAN}${R}"
     echo
+    set +e
     nmap -sCV -p"${ports}" ${SFLAGS} -vvv -n -Pn ${targets} -oX "$X_SCAN"
-
-    XML_PARTS+=("$X_SCAN")
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+        warn "El grupo ${GI} fallo (nmap codigo ${rc}); sigo con el resto."
+        [[ -s "$X_SCAN" ]] && XML_PARTS+=("$X_SCAN")   # guardar parcial si hay algo
+    else
+        XML_PARTS+=("$X_SCAN")
+    fi
 done
 
 # ===========================================================================
