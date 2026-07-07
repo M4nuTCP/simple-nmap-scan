@@ -45,21 +45,28 @@ sudo simple-scan -l ips.txt -o out.xml -p medio
 
 ## `--check` (recomendación de perfil)
 
-Antes de escanear, `--check` sondea la red con un `ping` corto (no intrusivo),
-mide **pérdida de paquetes, jitter y RTT**, detecta si sales por **VPN** y te
-**recomienda un perfil**. Si das `-l`, sondea el primer objetivo; si no, el
-gateway.
+Antes de escanear, `--check` sondea la red (2 ráfagas de ping, no intrusivo) y
+**recomienda un perfil**, con **fuerte sesgo de seguridad** para no tumbar redes.
 
 ```bash
 simple-scan --check -l ips.txt
 ```
 
-Si diste `-l`, al terminar te **pregunta si quieres ejecutar el escaneo con el
-perfil recomendado** y, si aceptas, te pide el **nombre del `.xml`** (con un valor
-por defecto derivado de la lista) y lo lanza directamente.
+**Reproducible entre máquinas.** La decisión de seguridad se basa en señales
+**intrínsecas de la red** (pérdida de paquetes, VPN, inestabilidad entre ráfagas),
+no en el ruido local de tu equipo:
 
-Habría avisado del problema típico de una **VPN inestable** (que puede tirar el
-escaneo a medias): con VPN, pérdida o jitter alto, recomienda un perfil suave.
+- La **pérdida** se mide agrupando ~40 paquetes y descartando el de warm-up (ARP);
+  un drop aislado en una sola ráfaga **no** te baja de perfil.
+- El **jitter/RTT** solo se usan para *subir* a `alto` cuando el enlace es **por
+  cable**, con 0% pérdida y estable — nunca deciden por sí solos. Por eso dos
+  auditores en la misma red (uno por WiFi, otro por cable) ya no sacan `bajo` vs
+  `alto`; sacan `medio` vs `alto` (adyacentes, el WiFi en el lado seguro).
+- **VPN** → tope `bajo`. **WiFi/desconocido** → tope `medio`. Cualquier
+  incertidumbre redondea hacia lo seguro. **`agresivo` nunca es automático.**
+
+Si diste `-l`, al terminar te **pregunta si ejecutar el escaneo** con el perfil
+recomendado y, si aceptas, te pide el **nombre del `.xml`** y lo lanza.
 
 ## Perfiles
 

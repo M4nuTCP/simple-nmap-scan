@@ -193,38 +193,107 @@ default_gateway() {
     ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' || true
 }
 
-# Ping a $1: rellena PING_RECV, PING_LOSS, PING_AVG, PING_MDEV, PING_MIN, PING_MAX.
-run_ping() {
-    local host="$1" out nums
-    PING_RECV=""; PING_LOSS=""; PING_AVG=""; PING_MDEV=""; PING_MIN=""; PING_MAX=""
-    out="$(LC_ALL=C timeout 8 ping -n -q -c 10 -i 0.2 -W 1 -w 5 "$host" 2>/dev/null)" || true
-    [[ -z "$out" ]] && return 1
-    # || true: con pipefail, un grep sin coincidencias (p.ej. sin linea rtt si
-    # el host no responde) haria fallar la tuberia y, con set -e, todo el script.
-    PING_LOSS="$(grep -oE '[0-9]+(\.[0-9]+)?% packet loss' <<<"$out" | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1 || true)"
-    PING_RECV="$(grep -oE '[0-9]+ received' <<<"$out" | grep -oE '^[0-9]+' | head -1 || true)"
-    nums="$(grep -oE '[0-9.]+/[0-9.]+/[0-9.]+(/[0-9.]+)?' <<<"$out" | head -1 || true)"
-    if [[ -n "$nums" ]]; then
-        PING_MIN="$(cut -d/ -f1 <<<"$nums")"
-        PING_AVG="$(cut -d/ -f2 <<<"$nums")"
-        PING_MAX="$(cut -d/ -f3 <<<"$nums")"
-        PING_MDEV="$(cut -d/ -f4 <<<"$nums")"       # vacio en busybox
+# Base de sysfs de interfaces (override para tests)
+NETSYS="${SIMPLE_SCAN_SYSNET:-/sys/class/net}"
+
+# Clase de enlace LOCAL de salida hacia $1: wired | wifi | vpn | unknown.
+# El jitter/RTT solo son fiables por cable; por eso esto condiciona la subida.
+link_class() {
+    local t="$1" dev
+    dev="$(ip route get "$t" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2; exit}' || true)"
+    [[ -z "$dev" ]] && { echo "unknown"; return; }
+    # VPN / tunel
+    if [[ "$dev" =~ ^(tun|tap|wg|ppp|ipsec|vti|xfrm|gre|sit|utun|nordlynx|proton|tailscale|ts|zt) ]] \
+       || ip -d link show dev "$dev" 2>/dev/null | grep -qiE 'wireguard|vti|xfrm|ipip|ip6tnl|gre|sit|ppp|tun|tap' \
+       || [[ -e "$NETSYS/$dev/type" && "$(cat "$NETSYS/$dev/type" 2>/dev/null)" != "1" ]]; then
+        echo "vpn"; return
     fi
+    # Wi-Fi
+    if [[ -d "$NETSYS/$dev/wireless" || -e "$NETSYS/$dev/phy80211" ]]; then
+        echo "wifi"; return
+    fi
+    # Cable (ethernet) confirmado
+    [[ "$(cat "$NETSYS/$dev/type" 2>/dev/null)" == "1" ]] && { echo "wired"; return; }
+    echo "unknown"
+}
+
+# Estadisticos robustos de una lista de RTTs (uno por linea en stdin):
+# imprime "count median jitter_robust".  jitter = 1.4826 * MAD (recortando el
+# outlier mayor); robusto frente a un pico local (WiFi/CPU), a diferencia de mdev.
+compute_stats() {
+    awk '{v[NR]=$1} END{
+        n=NR; if(n==0){print "0 0 0"; exit}
+        for(i=1;i<=n;i++)for(j=i+1;j<=n;j++)if(v[j]<v[i]){t=v[i];v[i]=v[j];v[j]=t}
+        if(n%2) med=v[(n+1)/2]; else med=(v[n/2]+v[n/2+1])/2
+        m=0; for(i=1;i<=n;i++){d=v[i]-med; if(d<0)d=-d; dev[++m]=d}
+        for(i=1;i<=m;i++)for(j=i+1;j<=m;j++)if(dev[j]<dev[i]){t=dev[i];dev[i]=dev[j];dev[j]=t}
+        mm=m; if(mm>3) mm=m-1            # recorta el outlier mayor
+        if(mm%2) madv=dev[(mm+1)/2]; else madv=(dev[mm/2]+dev[mm/2+1])/2
+        printf "%d %.3f %.3f\n", n, med, 1.4826*madv
+    }'
+}
+
+# Una rafaga de 21 paquetes (descarta el 1o, warm-up) hacia $1.
+# Rellena: B_SENT B_RECV B_MED B_JIT.  Devuelve 1 si no hubo respuesta.
+measure_burst() {
+    local host="$1" raw; local -a r
+    B_SENT=20; B_RECV=0; B_MED=""; B_JIT=""
+    raw="$(timeout 12 env LC_ALL=C ping -n -c 21 -i 0.2 -W 1 -w 8 "$host" 2>/dev/null || true)"
+    mapfile -t r < <(printf '%s\n' "$raw" | grep -oE 'time=[0-9.]+' | cut -d= -f2 || true)
+    [[ ${#r[@]} -eq 0 ]] && return 1
+    r=("${r[@]:1}")                       # descarta el primer paquete medido
+    B_RECV="${#r[@]}"
+    [[ "$B_RECV" -eq 0 ]] && return 1
+    read -r _ B_MED B_JIT < <(printf '%s\n' "${r[@]}" | compute_stats)
     return 0
 }
 
-# Recomienda perfil a partir de las metricas. Usa awk para comparar floats.
-# Args: loss jitter jitter_known avg_rtt rtt_known is_vpn reachable
+# Recomienda perfil con senales robustas (worst-first, primer match).
+# Args: reachable loss_pct loss_bursts rtt_ms jitter_ms unstable link_class n_ok
+# Techo AUTO = alto (agresivo nunca es automatico).
 recommend_profile() {
-    awk -v loss="${1:-0}" -v jit="${2:-0}" -v jok="${3:-0}" -v rtt="${4:-0}" \
-        -v rok="${5:-0}" -v vpn="${6:-0}" -v reach="${7:-1}" 'BEGIN{
-        if (reach==0 || loss>=10 || (rok && rtt>800))                              {print "superbajo"; exit}
-        if (loss>=1 || vpn==1 || (jok && jit>=30) || (rok && rtt>=300))            {print "bajo";      exit}
-        if ((loss>0 && loss<1) || (jok && jit>=10 && jit<30) || (rok && rtt>=100 && rtt<300)) {print "medio"; exit}
-        if (loss==0 && vpn==0 && jok && jit<10 && rok && rtt<100 && (jit>=1 || rtt>=20))       {print "alto";  exit}
-        if (loss==0 && vpn==0 && reach==1 && jok && jit<1 && rok && rtt<20)        {print "agresivo";  exit}
-        print "medio"   # incierto -> por defecto seguro
+    awk -v reach="${1:-1}" -v loss="${2:-0}" -v lb="${3:-0}" -v rtt="${4:-0}" \
+        -v jit="${5:-999}" -v uns="${6:-0}" -v link="${7:-unknown}" -v nok="${8:-0}" 'BEGIN{
+        # Primarias (intrinsecas de la red, iguales en cualquier maquina) -> mas seguro
+        if (reach==0 || loss>=10 || rtt>800 || (link=="vpn" && loss>=2)) {print "superbajo"; exit}
+        if ((loss>=2 && lb>=2) || link=="vpn" || (uns==1 && loss>0))      {print "bajo";      exit}
+        # Subida (unico sitio donde cuentan jitter/RTT): solo por CABLE, 0% perdida, estable
+        if (link=="wired" && loss==0 && uns==0 && nok>=2 && jit<5 && rtt<50) {print "alto";   exit}
+        # Por defecto y techo de todo lo que no sea prístino-por-cable
+        print "medio"
     }'
+}
+
+# Mide un host con PRIME (descartado) + 2 rafagas. Rellena, de forma segura:
+#   M_NOK M_LOSS_PCT M_LOSS_BURSTS M_RTT M_JIT M_UNSTABLE
+# Combinacion sesgada a peor: perdida agrupada; RTT/jitter = maximo de rafagas.
+measure_host() {
+    local host="$1" b sent_total=0 recv_total=0 nok=0 loss_bursts=0
+    local -a meds jits
+    M_NOK=0; M_LOSS_PCT=100; M_LOSS_BURSTS=0; M_RTT=""; M_JIT=""; M_UNSTABLE=0
+    LC_ALL=C ping -n -c 1 -W 1 "$host" >/dev/null 2>&1 || true   # PRIME (calienta ARP/ruta)
+    for b in 1 2; do
+        if measure_burst "$host"; then
+            nok=$((nok + 1))
+            meds+=("$B_MED"); jits+=("$B_JIT")
+            sent_total=$((sent_total + B_SENT)); recv_total=$((recv_total + B_RECV))
+            [[ "$B_RECV" -lt "$B_SENT" ]] && loss_bursts=$((loss_bursts + 1))
+        fi
+    done
+    M_NOK=$nok
+    [[ $nok -eq 0 ]] && return 1
+    M_LOSS_PCT="$(awk -v s="$sent_total" -v r="$recv_total" 'BEGIN{printf "%.1f", (s>0)?100*(s-r)/s:100}')"
+    M_LOSS_BURSTS=$loss_bursts
+    M_RTT="$(printf '%s\n' "${meds[@]}" | awk 'NR==1||$1>m{m=$1}END{print m+0}')"
+    M_JIT="$(printf '%s\n' "${jits[@]}" | awk 'NR==1||$1>m{m=$1}END{print m+0}')"
+    if [[ $nok -ge 2 ]]; then
+        M_UNSTABLE="$(awk -v m1="${meds[0]}" -v m2="${meds[1]}" -v j1="${jits[0]}" -v j2="${jits[1]}" 'BEGIN{
+            u=0; dm=m1-m2; if(dm<0)dm=-dm; base=(m1<m2?m1:m2); if(base<0.001)base=0.001
+            if(dm/base>0.5) u=1; if(dm>20) u=1
+            hi=(j1>j2?j1:j2); lo=(j1<j2?j1:j2); if(lo<0.001)lo=0.001; if(hi/lo>3) u=1
+            print u}')"
+    fi
+    return 0
 }
 
 do_check() {
@@ -250,58 +319,53 @@ do_check() {
     fi
     field "Sondeo a" "${B}${probe}${R}  ${GREY}(${src_desc})${R}"
 
-    # ---- Deteccion de VPN / tunel --------------------------------------
-    local dev="" is_vpn=0
+    # ---- Clase de enlace LOCAL (cable / WiFi / VPN) --------------------
+    local link dev
+    link="$(link_class "$probe")"
     dev="$(ip route get "$probe" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2; exit}' || true)"
-    if [[ -n "$dev" ]]; then
-        if [[ "$dev" =~ ^(tun|tap|wg|ppp|ipsec|vti|xfrm|gre|sit|utun|nordlynx|proton|tailscale|ts|zt) ]]; then
-            is_vpn=1
-        elif ip -d link show dev "$dev" 2>/dev/null | grep -qiE 'wireguard|vti|xfrm|ipip|ip6tnl|gre|sit|ppp|tun|tap'; then
-            is_vpn=1
-        fi
-        field "Interfaz" "${B}${dev}${R}$( [[ $is_vpn -eq 1 ]] && echo "  ${YLW}(VPN/tunel)${R}" || echo "  ${GREY}(directa)${R}" )"
-    fi
+    local linkcol="$GREY"; [[ "$link" == "wifi" || "$link" == "vpn" ]] && linkcol="$YLW"
+    [[ -n "$dev" ]] && field "Interfaz" "${B}${dev}${R}  ${linkcol}(${link})${R}"
 
-    # ---- Medir (si hay ping) -------------------------------------------
-    local reachable=1 jok=0 rok=0 note=""
+    # ---- Sin binario ping: comprobacion limitada ----------------------
+    local reachable=1 note=""
     if ! command -v ping >/dev/null 2>&1; then
         warn "Sin binario ${B}ping${R}: comprobacion limitada (sin perdida/jitter)."
-        if ip route get "$probe" >/dev/null 2>&1; then
-            note="ruta resuelta, pero no pude medir estabilidad"
-        else
-            reachable=0; note="ruta no resoluble"
-        fi
+        ip route get "$probe" >/dev/null 2>&1 && note="ruta resuelta, no pude medir estabilidad" || { reachable=0; note="ruta no resoluble"; }
         hr
         local rec_np; [[ $reachable -eq 0 ]] && rec_np="superbajo" || rec_np="medio"
-        _check_report "$probe" "?" "?" "?" "$is_vpn" "$reachable" "$note" "$rec_np"
+        _check_report "$probe" "?" "?" "?" "$link" "0" "$reachable" "$note" "$rec_np"
         offer_recommended_run "$rec_np"
         return 0
     fi
 
-    run_ping "$probe"
-    # Sin respuestas: puede ser filtrado ICMP. Cruzar con el gateway.
-    if [[ -z "${PING_RECV:-}" || "${PING_RECV:-0}" -eq 0 ]]; then
+    # ---- Medir: 2 rafagas; si el objetivo no responde, cruzar gateway --
+    info "Midiendo estabilidad (2 rafagas, ~10s)…"
+    local measured_gateway=0
+    measure_host "$probe" || true
+    if [[ "${M_NOK:-0}" -eq 0 ]]; then
         local gw; gw="$(default_gateway)"
-        if [[ -n "$gw" && "$gw" != "$probe" ]] && run_ping "$gw" && [[ "${PING_RECV:-0}" -gt 0 ]]; then
-            note="el objetivo filtra ICMP; mido estabilidad del gateway ${gw}"
+        if [[ -n "$gw" && "$gw" != "$probe" ]]; then
+            measure_host "$gw" || true
+            if [[ "${M_NOK:-0}" -gt 0 ]]; then
+                measured_gateway=1
+                note="el objetivo filtra ICMP; mido el gateway ${gw} (perfil rapido no aplicable)"
+            else
+                reachable=0
+            fi
         else
-            reachable=0; note="objetivo y gateway sin respuesta: ruta caida o inestable"
+            reachable=0
         fi
     fi
+    [[ $reachable -eq 0 ]] && note="objetivo y gateway sin respuesta: ruta caida o inestable"
 
-    local loss="${PING_LOSS:-100}" avg="${PING_AVG:-}" jit=""
-    # jitter: mdev si existe y hay >=3 respuestas; si no, (max-min) como proxy
-    if [[ "${PING_RECV:-0}" -ge 3 ]]; then
-        if [[ -n "${PING_MDEV:-}" ]]; then jit="$PING_MDEV"; jok=1
-        elif [[ -n "${PING_MIN:-}" && -n "${PING_MAX:-}" ]]; then
-            jit="$(awk -v a="$PING_MAX" -v b="$PING_MIN" 'BEGIN{printf "%.3f", a-b}')"; jok=1
-        fi
-    fi
-    [[ -n "$avg" ]] && rok=1
+    local loss="${M_LOSS_PCT:-100}" rtt="${M_RTT:-}" jit="${M_JIT:-}"
+    local rec
+    rec="$(recommend_profile "$reachable" "$loss" "${M_LOSS_BURSTS:-0}" "${rtt:-999}" "${jit:-999}" "${M_UNSTABLE:-0}" "$link" "${M_NOK:-0}")"
+    # Si medimos el gateway (no el objetivo), no sabemos la ruta al objetivo -> techo medio
+    [[ $measured_gateway -eq 1 && "$rec" == "alto" ]] && rec="medio"
 
     hr
-    local rec; rec="$(recommend_profile "$loss" "${jit:-0}" "$jok" "${avg:-0}" "$rok" "$is_vpn" "$reachable")"
-    _check_report "$probe" "$loss" "${avg:-?}" "${jit:-?}" "$is_vpn" "$reachable" "$note" "$rec"
+    _check_report "$probe" "$loss" "${rtt:-?}" "${jit:-?}" "$link" "${M_UNSTABLE:-0}" "$reachable" "$note" "$rec"
     offer_recommended_run "$rec"
 }
 
@@ -333,23 +397,34 @@ offer_recommended_run() {
     exec "$0" -l "$IP_LIST" -o "$name" -p "$rec" -y
 }
 
-# Imprime el informe + recomendacion. Args: probe loss avg jit vpn reach note [rec]
+# Imprime el informe + recomendacion.
+# Args: probe loss rtt jit link unstable reach note rec
 _check_report() {
-    local probe="$1" loss="$2" avg="$3" jit="$4" vpn="$5" reach="$6" note="$7" rec="${8:-medio}"
-    [[ "$reach" -eq 0 ]] && rec="superbajo"
+    local probe="$1" loss="$2" rtt="$3" jit="$4" link="$5" unstable="$6" reach="$7" note="$8" rec="${9:-medio}"
     local rc; rc="$(color_for_profile "$rec")"
 
     field "Alcanzable" "$( [[ $reach -eq 1 ]] && echo "${GRN}si${R}" || echo "${RED}no${R}" )"
-    [[ "$loss" != "?" ]] && field "Perdida"  "${B}${loss}%${R}"
-    [[ "$avg"  != "?" ]] && field "RTT medio" "${B}${avg} ms${R}"
-    [[ "$jit"  != "?" ]] && field "Jitter"    "${B}${jit} ms${R}  ${GREY}(mdev)${R}"
+    [[ "$loss" != "?" ]] && field "Perdida"  "${B}${loss}%${R}  ${GREY}(2 rafagas)${R}"
+    [[ "$rtt"  != "?" ]] && field "RTT" "${B}${rtt} ms${R}  ${GREY}(mediana)${R}"
+    [[ "$jit"  != "?" ]] && field "Jitter"    "${B}${jit} ms${R}  ${GREY}(MAD robusto)${R}"
+    [[ "$unstable" == "1" ]] && field "Estable" "${YLW}no (rafagas discrepan)${R}"
     [[ -n "$note" ]] && field "Nota" "${YLW}${note}${R}"
     hr
     echo -e "  ${B}Perfil recomendado:${R}  ${rc}${B}${rec}${R}  ${GREY}[${PROFILE_RATE[$rec]}]${R}"
     echo -e "  ${GREY}${PROFILE_DESC[$rec]}${R}"
+    # Motivo (por que ese techo)
+    local reason=""
+    case "$link" in
+        vpn)     reason="por VPN/tunel el techo es 'bajo' (ruta encapsulada, frágil)" ;;
+        wifi)    reason="por WiFi el techo es 'medio' (el jitter local no prueba que la red aguante)" ;;
+        unknown) reason="enlace desconocido: techo 'medio' por precaucion" ;;
+        wired)   [[ "$rec" == "alto" ]] && reason="cable + 0% perdida + estable: se permite 'alto'" \
+                                        || reason="por cable, pero sin datos prístinos: techo 'medio'" ;;
+    esac
+    [[ "$rec" == "superbajo" ]] && reason="red inestable o con perdida: maxima cautela"
+    [[ -n "$reason" ]] && echo -e "  ${DIM}(${reason}. 'agresivo' nunca es automatico.)${R}"
     hr
     echo
-    # Si no hay lista (-l), no se ofrece ejecutar: mostramos el comando sugerido.
     if [[ -z "$IP_LIST" ]]; then
         echo -e "  ${DIM}Para lanzar el escaneo con esa recomendacion:${R}"
         echo -e "  ${GRN}\$ simple-scan -l ips.txt -o out.xml -p ${rec}${R}"
@@ -505,6 +580,12 @@ echo
 # Aviso prominente si no hay sudo
 if [[ -n "$ROOT_WARN" ]]; then
     warn "$ROOT_WARN"
+    echo
+fi
+
+# Aviso al usar agresivo (nunca es automatico): puede tumbar redes fragiles
+if [[ "$PROFILE" == "agresivo" ]]; then
+    warn "Perfil ${RED}${B}agresivo${R} (8000 pps): solo para LAN robusta que hayas verificado. Puede ${B}tumbar redes fragiles${R}. Ante la duda usa ${B}--check${R} o ${B}-p medio${R}."
     echo
 fi
 
