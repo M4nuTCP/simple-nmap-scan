@@ -29,10 +29,16 @@ Al lanzarlo muestra los dos comandos de nmap que se van a ejecutar y pregunta
 
 ## Perfiles
 
-Controlan el equilibrio entre velocidad y no saturar la red escaneada:
+Controlan el equilibrio entre velocidad y no saturar la red escaneada. El techo
+de tasa lo fija `--max-rate` en los tres:
 
-- **`bajo`** — super seguro: tasa baja y timing educado para no tumbar redes
-  frágiles. Tarda algo más.
-- **`medio`** — sintonía perfecta: rápido sin saturar. Es el valor por defecto.
-- **`agresivo`** — más rápido pero acotado (sin `-T5` a lo loco): para redes que
+- **`bajo`** · `≤500 pps` — super seguro: `-T3` sin suelo de tasa (deja que nmap
+  frene ante congestión), pocos hosts en paralelo y más reintentos. Para redes
+  frágiles. Tarda más.
+- **`medio`** · `1000–3000 pps` — sintonía perfecta: `-T4` acotado, rápido sin
+  saturar. **Valor por defecto.**
+- **`agresivo`** · `3000–8000 pps` — más rápido pero acotado: `-T4` (nunca `-T5`,
+  que daría falsos negativos), techo de tasa y RTT ajustado. Para redes que
   aguanten.
+
+> Puedes subir/bajar las tasas editando los perfiles al inicio de `simple-scan`.

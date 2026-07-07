@@ -55,25 +55,34 @@ banner() {
 #  Base fase 1:  nmap -p- --open -sS -vvv -n -Pn <ip> -oG <f>
 #  Base fase 2:  nmap -sCV -p<puertos> -vvv -n -Pn <ip> -oX <f>
 #
-#  Los valores definitivos se ajustan tras la investigacion; estos son
-#  puntos de partida sensatos:
-#    bajo     -> super seguro, mas lento, no tumba redes fragiles
-#    medio    -> sintonia perfecta velocidad / no saturar (por defecto)
-#    agresivo -> mas rapido, pero acotado (sin -T5 a lo loco)
+#  Claves de diseno:
+#   - El techo real de carga lo pone --max-rate en TODOS los perfiles.
+#   - Fase 1 nunca usa -T2: su --scan-delay de 400ms sobre -p- (65535
+#     puertos) tardaria horas por host. bajo usa -T3 (se adapta y frena
+#     ante perdida) + techo bajo + sin --min-rate (deja que nmap frene).
+#   - agresivo se queda en -T4, nunca -T5 (T5 baja retries y da falsos
+#     negativos de puertos); va mas rapido pero con techo y retries >= 2.
+#   - --randomize-hosts reparte la carga y no concentra en una subred.
 # ===========================================================================
-declare -A DISC_FLAGS SERV_FLAGS PROFILE_DESC
+declare -A DISC_FLAGS SERV_FLAGS PROFILE_DESC PROFILE_RATE
 
-DISC_FLAGS[bajo]="-T2 --max-rate 500 --max-retries 3 --max-hostgroup 16 --host-timeout 30m"
-SERV_FLAGS[bajo]="-T2 --max-rate 500 --version-intensity 4 --host-timeout 20m"
-PROFILE_DESC[bajo]="super seguro (lento) — no satura redes fragiles"
+# bajo: super seguro. Sin --min-rate para que nmap frene ante congestion.
+DISC_FLAGS[bajo]="-T3 --max-rate 500 --max-hostgroup 16 --max-retries 5 --host-timeout 45m --randomize-hosts"
+SERV_FLAGS[bajo]="-T3 --max-rate 500 --version-intensity 2 --script-timeout 60s --max-retries 5 --host-timeout 30m"
+PROFILE_DESC[bajo]="super seguro — no tumba redes fragiles (mas lento)"
+PROFILE_RATE[bajo]="<=500 pps"
 
-DISC_FLAGS[medio]="-T4 --min-rate 1500 --max-rate 3000 --max-retries 2 --host-timeout 20m"
-SERV_FLAGS[medio]="-T4 --max-rate 3000 --host-timeout 15m"
+# medio: sintonia perfecta. Ventana 1000-3000 pps: rapido y sin saturar.
+DISC_FLAGS[medio]="-T4 --min-rate 1000 --max-rate 3000 --max-retries 3 --min-hostgroup 128 --host-timeout 30m --randomize-hosts"
+SERV_FLAGS[medio]="-T4 --script-timeout 2m --host-timeout 30m"
 PROFILE_DESC[medio]="sintonia perfecta velocidad / no saturar (por defecto)"
+PROFILE_RATE[medio]="1000-3000 pps"
 
-DISC_FLAGS[agresivo]="-T4 --min-rate 5000 --max-rate 10000 --max-retries 1 --min-hostgroup 64 --host-timeout 15m"
-SERV_FLAGS[agresivo]="-T4 --max-rate 10000 --version-light --host-timeout 12m"
+# agresivo: mas rapido pero acotado. Techo 8000 pps, RTT ajustado, retries>=2.
+DISC_FLAGS[agresivo]="-T4 --min-rate 3000 --max-rate 8000 --max-retries 2 --min-hostgroup 256 --max-rtt-timeout 300ms --initial-rtt-timeout 150ms --host-timeout 15m --randomize-hosts --defeat-rst-ratelimit"
+SERV_FLAGS[agresivo]="-T4 --max-rate 8000 --version-light --script-timeout 60s --max-retries 2 --host-timeout 15m --defeat-rst-ratelimit"
 PROFILE_DESC[agresivo]="mas rapido pero acotado (no a lo loco)"
+PROFILE_RATE[agresivo]="3000-8000 pps"
 
 # ===========================================================================
 #  Ayuda
@@ -94,9 +103,9 @@ ${B}PARAMETROS${R}
       --version   Version.
 
 ${B}PERFILES${R}
-  ${GRN}bajo${R}      ${PROFILE_DESC[bajo]}
-  ${YLW}medio${R}     ${PROFILE_DESC[medio]}
-  ${RED}agresivo${R}  ${PROFILE_DESC[agresivo]}
+  ${GRN}bajo${R}      ${PROFILE_DESC[bajo]}  ${GREY}[${PROFILE_RATE[bajo]}]${R}
+  ${YLW}medio${R}     ${PROFILE_DESC[medio]}  ${GREY}[${PROFILE_RATE[medio]}]${R}
+  ${RED}agresivo${R}  ${PROFILE_DESC[agresivo]}  ${GREY}[${PROFILE_RATE[agresivo]}]${R}
 
 ${B}EJEMPLO${R}
   simple-scan -l ips.txt -o out.xml -p medio
@@ -180,6 +189,7 @@ echo
 title "Resumen del escaneo"
 hr
 field "Perfil"    "${PCOL}${B}${PROFILE}${R}  ${GREY}${PROFILE_DESC[$PROFILE]}${R}"
+field "Tasa"      "${B}${PROFILE_RATE[$PROFILE]}${R}  ${GREY}(techo con --max-rate)${R}"
 field "Objetivos" "${B}${#TARGETS[@]}${R}  ${GREY}(desde ${IP_LIST})${R}"
 field "Salida"    "${B}${OUT_XML}${R}"
 [[ -n "$ROOT_WARN" ]] && field "Aviso" "${YLW}${ROOT_WARN}${R}"
