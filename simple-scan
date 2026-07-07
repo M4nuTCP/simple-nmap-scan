@@ -128,24 +128,201 @@ do_update() {
 #   - --randomize-hosts reparte la carga y no concentra en una subred.
 # ===========================================================================
 declare -A DISC_FLAGS SERV_FLAGS PROFILE_DESC PROFILE_RATE
+# Orden de la escalera (mas seguro -> mas rapido). Techo --max-rate estrictamente
+# creciente: 100 < 500 < 3000 < 5000 < 8000. Reintentos no crecientes: 7>=5>=3>=2>=2.
+PROFILE_ORDER=(superbajo bajo medio alto agresivo)
+
+# superbajo: maxima seguridad (OT/ICS/embebidos o redes inestables). Una sonda
+# a la vez (--max-parallelism 1). Fase 2 usa -T2 a proposito (solo puertos
+# abiertos): maxima cortesia en la etapa mas intrusiva.
+DISC_FLAGS[superbajo]="-T3 --max-rate 100 --max-parallelism 1 --max-hostgroup 8 --max-retries 7 --host-timeout 180m --randomize-hosts"
+SERV_FLAGS[superbajo]="-T2 --max-rate 100 --max-parallelism 1 --version-intensity 0 --script-timeout 90s --max-retries 7 --host-timeout 90m"
+PROFILE_DESC[superbajo]="maxima seguridad — redes fragiles o inestables (muy lento)"
+PROFILE_RATE[superbajo]="<=100 pps"
 
 # bajo: super seguro. Sin --min-rate para que nmap frene ante congestion.
 DISC_FLAGS[bajo]="-T3 --max-rate 500 --max-hostgroup 16 --max-retries 5 --host-timeout 45m --randomize-hosts"
 SERV_FLAGS[bajo]="-T3 --max-rate 500 --version-intensity 2 --script-timeout 60s --max-retries 5 --host-timeout 30m"
-PROFILE_DESC[bajo]="super seguro — no tumba redes fragiles (mas lento)"
+PROFILE_DESC[bajo]="super seguro — no tumba redes fragiles (lento)"
 PROFILE_RATE[bajo]="<=500 pps"
 
 # medio: sintonia perfecta. Ventana 1000-3000 pps: rapido y sin saturar.
 DISC_FLAGS[medio]="-T4 --min-rate 1000 --max-rate 3000 --max-retries 3 --min-hostgroup 128 --host-timeout 30m --randomize-hosts"
-SERV_FLAGS[medio]="-T4 --script-timeout 2m --host-timeout 30m"
+SERV_FLAGS[medio]="-T4 --max-rate 3000 --max-retries 3 --script-timeout 2m --host-timeout 30m"
 PROFILE_DESC[medio]="sintonia perfecta velocidad / no saturar (por defecto)"
 PROFILE_RATE[medio]="1000-3000 pps"
+
+# alto: rapido y preciso para redes limpias. Entre medio y agresivo, sin
+# --defeat-rst-ratelimit (mas preciso).
+DISC_FLAGS[alto]="-T4 --min-rate 2000 --max-rate 5000 --max-retries 2 --min-hostgroup 192 --max-rtt-timeout 500ms --initial-rtt-timeout 300ms --host-timeout 20m --randomize-hosts"
+SERV_FLAGS[alto]="-T4 --max-rate 5000 --version-light --max-retries 2 --script-timeout 90s --host-timeout 20m"
+PROFILE_DESC[alto]="rapido y preciso — para redes limpias (LAN sana)"
+PROFILE_RATE[alto]="2000-5000 pps"
 
 # agresivo: mas rapido pero acotado. Techo 8000 pps, RTT ajustado, retries>=2.
 DISC_FLAGS[agresivo]="-T4 --min-rate 3000 --max-rate 8000 --max-retries 2 --min-hostgroup 256 --max-rtt-timeout 300ms --initial-rtt-timeout 150ms --host-timeout 15m --randomize-hosts --defeat-rst-ratelimit"
 SERV_FLAGS[agresivo]="-T4 --max-rate 8000 --version-light --script-timeout 60s --max-retries 2 --host-timeout 15m --defeat-rst-ratelimit"
-PROFILE_DESC[agresivo]="mas rapido pero acotado (no a lo loco)"
+PROFILE_DESC[agresivo]="lo mas rapido, acotado — solo LAN robusta"
 PROFILE_RATE[agresivo]="3000-8000 pps"
+
+# Color por perfil (para la UI)
+color_for_profile() {
+    case "$1" in
+        superbajo) echo "$CYN" ;;  bajo) echo "$GRN" ;;  medio) echo "$YLW" ;;
+        alto)      echo "$MAG" ;;  agresivo) echo "$RED" ;;  *) echo "$R" ;;
+    esac
+}
+
+# ===========================================================================
+#  --check : mide la estabilidad de la red y recomienda un perfil
+# ===========================================================================
+
+# Reduce una expresion de objetivo de nmap a UNA IP "pingueable".
+reduce_to_ip() {
+    local t="$1"
+    t="${t%%,*}"                                   # primer elemento de una lista con comas
+    if [[ "$t" == *.*/* ]]; then                   # CIDR IPv4  -> red +1
+        t="${t%%/*}"; [[ "$t" == *.0 ]] && t="${t%.0}.1"
+    fi
+    [[ "$t" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] && t="${t%%-*}"   # rango a.b.c.d-e -> a.b.c.d
+    echo "$t"
+}
+
+# Gateway por defecto (primer salto).
+default_gateway() {
+    ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' || true
+}
+
+# Ping a $1: rellena PING_RECV, PING_LOSS, PING_AVG, PING_MDEV, PING_MIN, PING_MAX.
+run_ping() {
+    local host="$1" out nums
+    PING_RECV=""; PING_LOSS=""; PING_AVG=""; PING_MDEV=""; PING_MIN=""; PING_MAX=""
+    out="$(LC_ALL=C timeout 8 ping -n -q -c 10 -i 0.2 -W 1 -w 5 "$host" 2>/dev/null)" || true
+    [[ -z "$out" ]] && return 1
+    # || true: con pipefail, un grep sin coincidencias (p.ej. sin linea rtt si
+    # el host no responde) haria fallar la tuberia y, con set -e, todo el script.
+    PING_LOSS="$(grep -oE '[0-9]+(\.[0-9]+)?% packet loss' <<<"$out" | grep -oE '^[0-9]+(\.[0-9]+)?' | head -1 || true)"
+    PING_RECV="$(grep -oE '[0-9]+ received' <<<"$out" | grep -oE '^[0-9]+' | head -1 || true)"
+    nums="$(grep -oE '[0-9.]+/[0-9.]+/[0-9.]+(/[0-9.]+)?' <<<"$out" | head -1 || true)"
+    if [[ -n "$nums" ]]; then
+        PING_MIN="$(cut -d/ -f1 <<<"$nums")"
+        PING_AVG="$(cut -d/ -f2 <<<"$nums")"
+        PING_MAX="$(cut -d/ -f3 <<<"$nums")"
+        PING_MDEV="$(cut -d/ -f4 <<<"$nums")"       # vacio en busybox
+    fi
+    return 0
+}
+
+# Recomienda perfil a partir de las metricas. Usa awk para comparar floats.
+# Args: loss jitter jitter_known avg_rtt rtt_known is_vpn reachable
+recommend_profile() {
+    awk -v loss="${1:-0}" -v jit="${2:-0}" -v jok="${3:-0}" -v rtt="${4:-0}" \
+        -v rok="${5:-0}" -v vpn="${6:-0}" -v reach="${7:-1}" 'BEGIN{
+        if (reach==0 || loss>=10 || (rok && rtt>800))                              {print "superbajo"; exit}
+        if (loss>=1 || vpn==1 || (jok && jit>=30) || (rok && rtt>=300))            {print "bajo";      exit}
+        if ((loss>0 && loss<1) || (jok && jit>=10 && jit<30) || (rok && rtt>=100 && rtt<300)) {print "medio"; exit}
+        if (loss==0 && vpn==0 && jok && jit<10 && rok && rtt<100 && (jit>=1 || rtt>=20))       {print "alto";  exit}
+        if (loss==0 && vpn==0 && reach==1 && jok && jit<1 && rok && rtt<20)        {print "agresivo";  exit}
+        print "medio"   # incierto -> por defecto seguro
+    }'
+}
+
+do_check() {
+    banner; echo
+    title "Comprobacion de estabilidad de la red"
+    hr
+
+    # ---- Elegir objetivo de sondeo -------------------------------------
+    local probe="" src_desc="" first=""
+    if [[ -n "$IP_LIST" && -f "$IP_LIST" ]]; then
+        first="$(sed 's/#.*//' "$IP_LIST" | awk '{$1=$1};1' | grep -v '^$' | head -1 || true)"
+        [[ -n "$first" ]] && probe="$(reduce_to_ip "$first")"
+    fi
+    if [[ -n "$probe" ]]; then
+        src_desc="primer objetivo de ${IP_LIST}"
+    else
+        probe="$(default_gateway)"
+        src_desc="gateway por defecto (no se dio -l)"
+    fi
+    if [[ -z "$probe" ]]; then
+        err "No pude determinar un objetivo para el sondeo (ni -l ni gateway)."
+        return 1
+    fi
+    field "Sondeo a" "${B}${probe}${R}  ${GREY}(${src_desc})${R}"
+
+    # ---- Deteccion de VPN / tunel --------------------------------------
+    local dev="" is_vpn=0
+    dev="$(ip route get "$probe" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2; exit}' || true)"
+    if [[ -n "$dev" ]]; then
+        if [[ "$dev" =~ ^(tun|tap|wg|ppp|ipsec|vti|xfrm|gre|sit|utun|nordlynx|proton|tailscale|ts|zt) ]]; then
+            is_vpn=1
+        elif ip -d link show dev "$dev" 2>/dev/null | grep -qiE 'wireguard|vti|xfrm|ipip|ip6tnl|gre|sit|ppp|tun|tap'; then
+            is_vpn=1
+        fi
+        field "Interfaz" "${B}${dev}${R}$( [[ $is_vpn -eq 1 ]] && echo "  ${YLW}(VPN/tunel)${R}" || echo "  ${GREY}(directa)${R}" )"
+    fi
+
+    # ---- Medir (si hay ping) -------------------------------------------
+    local reachable=1 jok=0 rok=0 note=""
+    if ! command -v ping >/dev/null 2>&1; then
+        warn "Sin binario ${B}ping${R}: comprobacion limitada (sin perdida/jitter)."
+        if ip route get "$probe" >/dev/null 2>&1; then
+            note="ruta resuelta, pero no pude medir estabilidad"
+        else
+            reachable=0; note="ruta no resoluble"
+        fi
+        hr
+        _check_report "$probe" "?" "?" "?" "$is_vpn" "$reachable" "$note"
+        return 0
+    fi
+
+    run_ping "$probe"
+    # Sin respuestas: puede ser filtrado ICMP. Cruzar con el gateway.
+    if [[ -z "${PING_RECV:-}" || "${PING_RECV:-0}" -eq 0 ]]; then
+        local gw; gw="$(default_gateway)"
+        if [[ -n "$gw" && "$gw" != "$probe" ]] && run_ping "$gw" && [[ "${PING_RECV:-0}" -gt 0 ]]; then
+            note="el objetivo filtra ICMP; mido estabilidad del gateway ${gw}"
+        else
+            reachable=0; note="objetivo y gateway sin respuesta: ruta caida o inestable"
+        fi
+    fi
+
+    local loss="${PING_LOSS:-100}" avg="${PING_AVG:-}" jit=""
+    # jitter: mdev si existe y hay >=3 respuestas; si no, (max-min) como proxy
+    if [[ "${PING_RECV:-0}" -ge 3 ]]; then
+        if [[ -n "${PING_MDEV:-}" ]]; then jit="$PING_MDEV"; jok=1
+        elif [[ -n "${PING_MIN:-}" && -n "${PING_MAX:-}" ]]; then
+            jit="$(awk -v a="$PING_MAX" -v b="$PING_MIN" 'BEGIN{printf "%.3f", a-b}')"; jok=1
+        fi
+    fi
+    [[ -n "$avg" ]] && rok=1
+
+    hr
+    _check_report "$probe" "$loss" "${avg:-?}" "${jit:-?}" "$is_vpn" "$reachable" "$note" \
+        "$(recommend_profile "$loss" "${jit:-0}" "$jok" "${avg:-0}" "$rok" "$is_vpn" "$reachable")"
+}
+
+# Imprime el informe + recomendacion. Args: probe loss avg jit vpn reach note [rec]
+_check_report() {
+    local probe="$1" loss="$2" avg="$3" jit="$4" vpn="$5" reach="$6" note="$7" rec="${8:-medio}"
+    [[ "$reach" -eq 0 ]] && rec="superbajo"
+    local rc; rc="$(color_for_profile "$rec")"
+
+    field "Alcanzable" "$( [[ $reach -eq 1 ]] && echo "${GRN}si${R}" || echo "${RED}no${R}" )"
+    [[ "$loss" != "?" ]] && field "Perdida"  "${B}${loss}%${R}"
+    [[ "$avg"  != "?" ]] && field "RTT medio" "${B}${avg} ms${R}"
+    [[ "$jit"  != "?" ]] && field "Jitter"    "${B}${jit} ms${R}  ${GREY}(mdev)${R}"
+    [[ -n "$note" ]] && field "Nota" "${YLW}${note}${R}"
+    hr
+    echo -e "  ${B}Perfil recomendado:${R}  ${rc}${B}${rec}${R}  ${GREY}[${PROFILE_RATE[$rec]}]${R}"
+    echo -e "  ${GREY}${PROFILE_DESC[$rec]}${R}"
+    echo
+    local ejemplo="simple-scan -l ${IP_LIST:-ips.txt} -o ${OUT_XML:-out.xml} -p ${rec}"
+    echo -e "  ${DIM}Para lanzar el escaneo con esa recomendacion:${R}"
+    echo -e "  ${GRN}\$ ${ejemplo}${R}"
+    hr
+    echo
+}
 
 # ===========================================================================
 #  Ayuda
@@ -156,23 +333,28 @@ usage() {
 
 ${B}USO${R}
   simple-scan -l <ips.txt> -o <salida.xml> [-p <perfil>] [-y]
+  simple-scan --check -l <ips.txt>            # mide la red y recomienda perfil
 
 ${B}PARAMETROS${R}
   -l, --list      Fichero .txt con una IP (o rango) por linea.
   -o, --output    Nombre del fichero XML de salida.
-  -p, --profile   Perfil de intensidad: bajo | medio | agresivo  (def: medio)
+  -p, --profile   Perfil: superbajo | bajo | medio | alto | agresivo  (def: medio)
   -y, --yes       No preguntar confirmacion, ejecutar directamente.
+      --check     Comprobar estabilidad de la red y recomendar un perfil.
       --update    Descargar la ultima version y reinstalarla.
   -h, --help      Esta ayuda.
       --version   Version.
 
-${B}PERFILES${R}
-  ${GRN}bajo${R}      ${PROFILE_DESC[bajo]}  ${GREY}[${PROFILE_RATE[bajo]}]${R}
-  ${YLW}medio${R}     ${PROFILE_DESC[medio]}  ${GREY}[${PROFILE_RATE[medio]}]${R}
-  ${RED}agresivo${R}  ${PROFILE_DESC[agresivo]}  ${GREY}[${PROFILE_RATE[agresivo]}]${R}
+${B}PERFILES${R}  ${GREY}(mas seguro/lento  ->  mas rapido)${R}
+  ${CYN}superbajo${R}  ${PROFILE_DESC[superbajo]}  ${GREY}[${PROFILE_RATE[superbajo]}]${R}
+  ${GRN}bajo${R}       ${PROFILE_DESC[bajo]}  ${GREY}[${PROFILE_RATE[bajo]}]${R}
+  ${YLW}medio${R}      ${PROFILE_DESC[medio]}  ${GREY}[${PROFILE_RATE[medio]}]${R}
+  ${MAG}alto${R}       ${PROFILE_DESC[alto]}  ${GREY}[${PROFILE_RATE[alto]}]${R}
+  ${RED}agresivo${R}   ${PROFILE_DESC[agresivo]}  ${GREY}[${PROFILE_RATE[agresivo]}]${R}
 
 ${B}EJEMPLO${R}
-  simple-scan -l ips.txt -o out.xml -p medio
+  simple-scan --check -l ips.txt              # 1) ver que perfil conviene
+  simple-scan -l ips.txt -o out.xml -p medio  # 2) escanear
 EOF
     echo
 }
@@ -180,7 +362,7 @@ EOF
 # ===========================================================================
 #  Parseo de argumentos
 # ===========================================================================
-IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0
+IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0; DO_CHECK=0
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -189,6 +371,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)  OUT_XML="${2:-}"; shift 2 ;;
         -p|--profile) PROFILE="${2:-}"; shift 2 ;;
         -y|--yes)     ASSUME_YES=1; shift ;;
+        --check)      DO_CHECK=1; shift ;;
         --update)     do_update; exit $? ;;
         -h|--help)    usage; exit 0 ;;
         --version)    echo "simple-scan v${VERSION}"; exit 0 ;;
@@ -200,6 +383,9 @@ done
 [[ -z "$IP_LIST" && ${#POSITIONAL[@]} -ge 1 ]] && IP_LIST="${POSITIONAL[0]}"
 [[ -z "$OUT_XML" && ${#POSITIONAL[@]} -ge 2 ]] && OUT_XML="${POSITIONAL[1]}"
 
+# --check: mide estabilidad y recomienda perfil (no requiere -o)
+[[ "$DO_CHECK" -eq 1 ]] && { do_check; exit $?; }
+
 # ===========================================================================
 #  Validaciones
 # ===========================================================================
@@ -208,7 +394,7 @@ done
 
 if [[ -z "${DISC_FLAGS[$PROFILE]:-}" ]]; then
     err "Perfil desconocido: ${B}${PROFILE}${R}"
-    echo -e "   Perfiles validos: ${GRN}bajo${R} | ${YLW}medio${R} | ${RED}agresivo${R}" >&2
+    echo -e "   Perfiles validos: ${CYN}superbajo${R} | ${GRN}bajo${R} | ${YLW}medio${R} | ${MAG}alto${R} | ${RED}agresivo${R}" >&2
     exit 1
 fi
 
@@ -249,11 +435,7 @@ mapfile -t TARGETS < <(sed 's/#.*//' "$IP_LIST" | awk '{$1=$1};1' | grep -v '^$'
 [[ ${#TARGETS[@]} -eq 0 ]] && { err "El fichero ${B}${IP_LIST}${R} no contiene IPs validas."; exit 1; }
 
 # Color del perfil para la UI
-case "$PROFILE" in
-    bajo)     PCOL="$GRN" ;;
-    medio)    PCOL="$YLW" ;;
-    agresivo) PCOL="$RED" ;;
-esac
+PCOL="$(color_for_profile "$PROFILE")"
 
 # ===========================================================================
 #  Vista previa de los comandos + confirmacion

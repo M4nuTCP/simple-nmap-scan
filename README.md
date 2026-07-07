@@ -19,16 +19,18 @@ sudo ./setup uninstall  # lo elimina
 ## Uso
 
 ```bash
-simple-scan -l ips.txt -o out.xml -p medio
+simple-scan --check -l ips.txt              # 1) mide la red y recomienda perfil
+simple-scan -l ips.txt -o out.xml -p medio  # 2) escanea
 ```
 
-| Parámetro         | Descripción                                            |
-|-------------------|--------------------------------------------------------|
-| `-l`, `--list`    | Fichero `.txt` con una IP (o rango) por línea.         |
-| `-o`, `--output`  | Nombre del XML de salida.                              |
-| `-p`, `--profile` | `bajo` \| `medio` \| `agresivo` (por defecto `medio`). |
-| `-y`, `--yes`     | Ejecuta sin pedir confirmación.                        |
-| `--update`        | Descarga la última versión y la reinstala.             |
+| Parámetro         | Descripción                                                        |
+|-------------------|-------------------------------------------------------------------|
+| `-l`, `--list`    | Fichero `.txt` con una IP (o rango) por línea.                    |
+| `-o`, `--output`  | Nombre del XML de salida.                                         |
+| `-p`, `--profile` | `superbajo` \| `bajo` \| `medio` \| `alto` \| `agresivo` (def. `medio`). |
+| `-y`, `--yes`     | Ejecuta sin pedir confirmación.                                  |
+| `--check`         | Mide la estabilidad de la red y recomienda un perfil.            |
+| `--update`        | Descarga la última versión y la reinstala.                       |
 
 Al lanzarlo muestra los dos comandos de nmap que se van a ejecutar y pregunta
 `¿Ejecutar el escaneo? [y/N]`. Con `y` arranca.
@@ -41,18 +43,30 @@ funciona igual pero es más lento y ruidoso.
 sudo simple-scan -l ips.txt -o out.xml -p medio
 ```
 
+## `--check` (recomendación de perfil)
+
+Antes de escanear, `--check` sondea la red con un `ping` corto (no intrusivo),
+mide **pérdida de paquetes, jitter y RTT**, detecta si sales por **VPN** y te
+**recomienda un perfil**. Si das `-l`, sondea el primer objetivo; si no, el
+gateway.
+
+```bash
+simple-scan --check -l ips.txt
+```
+
+Habría avisado del problema típico de una **VPN inestable** (que puede tirar el
+escaneo a medias): con VPN, pérdida o jitter alto, recomienda un perfil suave.
+
 ## Perfiles
 
-Controlan el equilibrio entre velocidad y no saturar la red escaneada. El techo
-de tasa lo fija `--max-rate` en los tres:
+De más seguro/lento a más rápido. El techo de tasa lo fija `--max-rate` en todos
+(estrictamente creciente):
 
-- **`bajo`** · `≤500 pps` — super seguro: `-T3` sin suelo de tasa (deja que nmap
-  frene ante congestión), pocos hosts en paralelo y más reintentos. Para redes
-  frágiles. Tarda más.
-- **`medio`** · `1000–3000 pps` — sintonía perfecta: `-T4` acotado, rápido sin
-  saturar. **Valor por defecto.**
-- **`agresivo`** · `3000–8000 pps` — más rápido pero acotado: `-T4` (nunca `-T5`,
-  que daría falsos negativos), techo de tasa y RTT ajustado. Para redes que
-  aguanten.
+- **`superbajo`** · `≤100 pps` — máxima seguridad: una sonda a la vez. Para redes
+  OT/ICS/embebidas o **inestables**. Muy lento.
+- **`bajo`** · `≤500 pps` — super seguro: `-T3` sin suelo de tasa. Redes frágiles.
+- **`medio`** · `1000–3000 pps` — sintonía perfecta, rápido sin saturar. **Por defecto.**
+- **`alto`** · `2000–5000 pps` — rápido y preciso para redes limpias (LAN sana).
+- **`agresivo`** · `3000–8000 pps` — lo más rápido, acotado (nunca `-T5`). Solo LAN robusta.
 
-> Puedes subir/bajar las tasas editando los perfiles al inicio de `simple-scan`.
+> Puedes ajustar las tasas editando los perfiles al inicio de `simple-scan`.
