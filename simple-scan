@@ -15,6 +15,11 @@ set -euo pipefail
 
 VERSION="1.0.0"
 
+# Origen para --update (se puede sobreescribir por entorno)
+REPO_SLUG="${SIMPLE_SCAN_REPO:-M4nuTCP/simple-nmap-scan}"
+REPO_BRANCH="${SIMPLE_SCAN_BRANCH:-main}"
+UPDATE_URL="${SIMPLE_SCAN_URL:-https://raw.githubusercontent.com/${REPO_SLUG}/${REPO_BRANCH}/simple-scan}"
+
 # ===========================================================================
 #  Estetica
 # ===========================================================================
@@ -48,6 +53,61 @@ banner() {
     echo -e "${BLU}╭${bar}╮${R}"
     echo -e "${BLU}│${R}  ${B}simple-scan${R} ${GREY}v${VERSION}${R}   ${DIM}·${R}   ${DIM}escaneo nmap en dos fases${R}$(printf '%*s' "$pad" '')${BLU}│${R}"
     echo -e "${BLU}╰${bar}╯${R}"
+}
+
+# ===========================================================================
+#  Autoactualizacion: descarga la ultima version y la reinstala en su sitio
+# ===========================================================================
+do_update() {
+    banner; echo
+    title "Actualizar simple-scan"
+    hr
+
+    local target tmp newver
+    target="$(command -v simple-scan 2>/dev/null || true)"
+    [[ -z "$target" ]] && target="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    field "Binario" "${B}${target}${R}"
+    field "Origen"  "${GREY}${UPDATE_URL}${R}"
+    echo
+
+    tmp="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" RETURN
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$UPDATE_URL" -o "$tmp" || { err "No pude descargar (curl) desde el origen."; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$tmp" "$UPDATE_URL" || { err "No pude descargar (wget) desde el origen."; return 1; }
+    else
+        err "Necesito ${B}curl${R} o ${B}wget${R} para actualizar."; return 1
+    fi
+
+    # Validar que lo descargado es realmente simple-scan
+    if ! head -n1 "$tmp" | grep -q '^#!.*bash' || ! grep -q 'simple-scan' "$tmp"; then
+        err "La descarga no parece un simple-scan valido. Aborto sin tocar nada."
+        return 1
+    fi
+
+    newver="$(grep -m1 '^VERSION=' "$tmp" | cut -d'"' -f2)"
+    if [[ -n "$newver" && "$newver" == "$VERSION" ]]; then
+        hr; ok "Ya tienes la ultima version (${B}v${VERSION}${R})."; echo
+        return 0
+    fi
+
+    chmod +x "$tmp"
+    if [[ -w "$target" ]]; then
+        install -m 0755 "$tmp" "$target"
+    elif command -v sudo >/dev/null 2>&1; then
+        warn "Se necesitan privilegios para escribir en ${target}"
+        sudo install -m 0755 "$tmp" "$target"
+    else
+        err "Sin permisos de escritura en ${target} y no hay sudo. Reintenta como root."
+        return 1
+    fi
+
+    hr
+    ok "Actualizado: ${B}v${VERSION}${R} → ${GRN}${B}v${newver:-?}${R}"
+    echo
 }
 
 # ===========================================================================
@@ -99,6 +159,7 @@ ${B}PARAMETROS${R}
   -o, --output    Nombre del fichero XML de salida.
   -p, --profile   Perfil de intensidad: bajo | medio | agresivo  (def: medio)
   -y, --yes       No preguntar confirmacion, ejecutar directamente.
+      --update    Descargar la ultima version y reinstalarla.
   -h, --help      Esta ayuda.
       --version   Version.
 
@@ -125,6 +186,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)  OUT_XML="${2:-}"; shift 2 ;;
         -p|--profile) PROFILE="${2:-}"; shift 2 ;;
         -y|--yes)     ASSUME_YES=1; shift ;;
+        --update)     do_update; exit $? ;;
         -h|--help)    usage; exit 0 ;;
         --version)    echo "simple-scan v${VERSION}"; exit 0 ;;
         -*)           err "Opcion desconocida: $1"; echo "Prueba: simple-scan --help" >&2; exit 1 ;;

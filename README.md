@@ -28,6 +28,7 @@ simple-scan -l ips.txt -o out.xml -p medio
 | `-o`, `--output`  | Nombre del XML de salida.                              |
 | `-p`, `--profile` | `bajo` \| `medio` \| `agresivo` (por defecto `medio`). |
 | `-y`, `--yes`     | Ejecuta sin pedir confirmación.                        |
+| `--update`        | Descarga la última versión y la reinstala.             |
 
 Al lanzarlo muestra los dos comandos de nmap que se van a ejecutar y pregunta
 `¿Ejecutar el escaneo? [y/N]`. Con `y` arranca.
