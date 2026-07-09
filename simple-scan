@@ -64,23 +64,41 @@ do_update() {
     title "Actualizar simple-scan"
     hr
 
-    local target tmp newver
+    local target tmp newver fetch_url sha
     target="$(command -v simple-scan 2>/dev/null || true)"
     [[ -z "$target" ]] && target="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || { err "Necesito ${B}curl${R} o ${B}wget${R} para actualizar."; return 1; }
+
+    # Resolver el ultimo commit por la API y descargar POR SHA: las URLs raw por
+    # SHA nunca se sirven obsoletas (el HEAD/rama cachea ~5 min en la CDN).
+    fetch_url="$UPDATE_URL"
+    if [[ -z "${SIMPLE_SCAN_URL:-}" ]] && command -v curl >/dev/null 2>&1; then
+        sha="$(curl -fsSL --max-time 8 -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/${REPO_SLUG}/commits/${REPO_BRANCH}" 2>/dev/null \
+              | grep -oE '[0-9a-f]{40}' | head -1 || true)"
+        [[ -n "$sha" ]] && fetch_url="https://raw.githubusercontent.com/${REPO_SLUG}/${sha}/simple-scan"
+    fi
+
     field "Binario" "${B}${target}${R}"
-    field "Origen"  "${GREY}${UPDATE_URL}${R}"
+    field "Origen"  "${GREY}${fetch_url}${R}"
     echo
 
     tmp="$(mktemp)"
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" RETURN
 
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$UPDATE_URL" -o "$tmp" || { err "No pude descargar (curl) desde el origen."; return 1; }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$tmp" "$UPDATE_URL" || { err "No pude descargar (wget) desde el origen."; return 1; }
-    else
-        err "Necesito ${B}curl${R} o ${B}wget${R} para actualizar."; return 1
+    # Descarga con vuelta atras a HEAD si la via por SHA fallara.
+    _dl() {
+        if command -v curl >/dev/null 2>&1; then curl -fsSL --max-time 30 "$1" -o "$2"
+        else wget -qO "$2" "$1"; fi
+    }
+    if ! _dl "$fetch_url" "$tmp"; then
+        if [[ "$fetch_url" != "$UPDATE_URL" ]] && _dl "$UPDATE_URL" "$tmp"; then
+            :
+        else
+            err "No pude descargar desde el origen."; return 1
+        fi
     fi
 
     # Validar que lo descargado es realmente simple-scan
