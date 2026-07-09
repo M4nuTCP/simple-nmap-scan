@@ -9,12 +9,34 @@ la lista en una sola pasada** dejando que nmap paralelice entre hosts, y la
 fase 2 (servicios/versiones) agrupa las IPs por puertos y lanza un escaneo por
 grupo — no una ejecución por IP.
 
+Incluye dos binarios:
+
+- **`simple-scan`** — escanea una **lista de IPs** (`.txt`) con perfiles y `--check`.
+- **`trama-scan`** — escanea una **trama/CIDR** entera en 3 fases: equipos
+  activos → puertos → servicios (`-sV`).
+
 ## Instalación (Debian/Ubuntu)
 
 ```bash
-sudo ./setup            # instala en /usr/local/bin y comprueba nmap
-sudo ./setup uninstall  # lo elimina
+sudo ./setup            # instala simple-scan y trama-scan en /usr/local/bin
+sudo ./setup uninstall  # los elimina
 ```
+
+## trama-scan (una trama/CIDR)
+
+Parte de una red y descubre todo automáticamente:
+
+```bash
+sudo trama-scan 172.16.12.0/24
+```
+
+1. **Equipos activos** (`nmap -sn`) → guarda los vivos en `ips_trama_<red>.txt`.
+2. **Puertos** (`nmap -p- -sS --open`) sobre los equipos vivos.
+3. **Servicios/versiones** (`nmap -sV`) sobre los puertos encontrados →
+   `trama_<red>.xml`.
+
+Muestra los 3 comandos, pide confirmación y los ejecuta con triple verbose.
+Opciones: `-o <xml>`, `-r <min-rate>` (def. 3000), `-y`.
 
 ## Uso
 

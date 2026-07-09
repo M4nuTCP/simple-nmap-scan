@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+#
+#  trama-scan - Escaneo de una trama/CIDR en tres fases con nmap
+#  ------------------------------------------------------------------
+#  Fase 1  Equipos activos   (host discovery)   -> ips_trama_<red>.txt
+#  Fase 2  Puertos abiertos  (-p- -sS)          -> puertos encontrados
+#  Fase 3  Servicios/version (-sS -sV)          -> trama_<red>.xml
+#
+#  Uso:
+#     sudo trama-scan 172.16.12.0/24
+#     sudo trama-scan -t 172.16.12.0/24 -o salida.xml -r 3000
+#
+set -euo pipefail
+
+VERSION="1.0.0"
+
+# ===========================================================================
+#  Estetica
+# ===========================================================================
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    B=$'\033[1m'; DIM=$'\033[2m'; R=$'\033[0m'
+    RED=$'\033[38;5;203m'; GRN=$'\033[38;5;114m'; YLW=$'\033[38;5;221m'
+    BLU=$'\033[38;5;75m';  CYN=$'\033[38;5;80m';  MAG=$'\033[38;5;176m'
+    GREY=$'\033[38;5;245m'
+else
+    B=""; DIM=""; R=""; RED=""; GRN=""; YLW=""; BLU=""; CYN=""; MAG=""; GREY=""
+fi
+
+hr()    { echo -e "${GREY}────────────────────────────────────────────────────────────${R}"; }
+title() { echo -e "${B}${BLU}$*${R}"; }
+step()  { echo -e "${B}${MAG}$*${R}"; }
+info()  { echo -e "  ${CYN}•${R} $*"; }
+ok()    { echo -e "  ${GRN}✔${R} $*"; }
+warn()  { echo -e "  ${YLW}!${R} $*"; }
+err()   { echo -e "${RED}✖${R} $*" >&2; }
+field() { printf "  ${GREY}%-11s${R} %b\n" "$1" "$2"; }
+
+banner() {
+    local w=58 bar; bar="$(printf '%.0s─' $(seq 1 "$w"))"
+    echo
+    echo -e "${BLU}╭${bar}╮${R}"
+    echo -e "${BLU}│${R}  ${B}trama-scan${R} ${GREY}v${VERSION}${R}   ${DIM}·${R}   ${DIM}escaneo de una trama en 3 fases${R}  ${BLU}│${R}"
+    echo -e "${BLU}╰${bar}╯${R}"
+}
+
+usage() {
+    banner
+    cat <<EOF
+
+${B}USO${R}
+  sudo trama-scan <trama/CIDR> [-o <salida.xml>] [-r <min-rate>] [-y]
+  sudo trama-scan -t 172.16.12.0/24 -o out.xml
+
+${B}PARAMETROS${R}
+  -t, --trama     Trama a escanear en formato CIDR (p.ej. 172.16.12.0/24).
+  -o, --output    XML de salida (def: trama_<red>.xml).
+  -r, --min-rate  Paquetes/seg (def: 3000).
+  -y, --yes       Ejecuta sin pedir confirmacion.
+  -h, --help      Esta ayuda.
+
+${B}FASES${R}
+  1. Equipos activos   ${GREY}nmap -sn -n --min-rate R <trama>${R}
+  2. Puertos           ${GREY}nmap -p- -sS --open -vvv -n -Pn -iL <activos>${R}
+  3. Servicios (-sV)   ${GREY}nmap -p<puertos> -sS -sV --open -vvv -n -Pn -iL <activos> -oX${R}
+EOF
+    echo
+}
+
+# ===========================================================================
+#  Argumentos
+# ===========================================================================
+TRAMA=""; OUT_XML=""; MIN_RATE=3000; ASSUME_YES=0
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--trama)    TRAMA="${2:-}"; shift 2 ;;
+        -o|--output)   OUT_XML="${2:-}"; shift 2 ;;
+        -r|--min-rate) MIN_RATE="${2:-}"; shift 2 ;;
+        -y|--yes)      ASSUME_YES=1; shift ;;
+        -h|--help)     usage; exit 0 ;;
+        --version)     echo "trama-scan v${VERSION}"; exit 0 ;;
+        -*)            err "Opcion desconocida: $1"; echo "Prueba: trama-scan --help" >&2; exit 1 ;;
+        *)             POSITIONAL+=("$1"); shift ;;
+    esac
+done
+[[ -z "$TRAMA" && ${#POSITIONAL[@]} -ge 1 ]] && TRAMA="${POSITIONAL[0]}"
+
+# ===========================================================================
+#  Validaciones
+# ===========================================================================
+[[ -z "$TRAMA" ]] && { err "Falta la trama (CIDR). Ej: ${B}sudo trama-scan 172.16.12.0/24${R}"; exit 1; }
+if [[ ! "$TRAMA" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+    err "Trama invalida: ${B}${TRAMA}${R}. Formato esperado: ${B}172.16.12.0/24${R}"
+    exit 1
+fi
+command -v nmap >/dev/null 2>&1 || { err "nmap no esta instalado: ${B}sudo apt install nmap${R}"; exit 1; }
+
+# Base de la red para nombrar ficheros: 172.16.12.0/24 -> 172.16.12.0
+BASE="${TRAMA%%/*}"
+LIVE_FILE="ips_trama_${BASE}.txt"
+[[ -z "$OUT_XML" ]] && OUT_XML="trama_${BASE}.xml"
+[[ "$OUT_XML" != *.xml ]] && OUT_XML="${OUT_XML}.xml"
+
+# -sS necesita privilegios (root o cap_net_raw); si no, se avisa y se usa -sT.
+CAN_SYN=0
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    CAN_SYN=1
+elif command -v getcap >/dev/null 2>&1; then
+    getcap "$(readlink -f "$(command -v nmap)")" 2>/dev/null | grep -qi 'cap_net_raw' && CAN_SYN=1
+fi
+if [[ "$CAN_SYN" -eq 1 ]]; then SCAN_TYPE="-sS"; ROOT_WARN=""
+else SCAN_TYPE="-sT"; ROOT_WARN="Sin privilegios: ${B}-sS${R} necesita root/cap_net_raw. Uso ${B}-sT${R} (connect). Para lo optimo: ${B}sudo trama-scan ...${R}"; fi
+
+TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT
+
+# ===========================================================================
+#  Vista previa + confirmacion
+# ===========================================================================
+banner
+echo
+title "Resumen"
+hr
+field "Trama"    "${B}${TRAMA}${R}"
+field "Activos"  "${B}${LIVE_FILE}${R}  ${GREY}(equipos vivos)${R}"
+field "Salida"   "${B}${OUT_XML}${R}"
+field "Min-rate" "${B}${MIN_RATE}${R} pps"
+field "Escaneo"  "${B}${SCAN_TYPE}${R}"
+hr
+echo
+title "Comandos que se ejecutaran"
+hr
+echo -e "  ${B}${CYN}1.${R} ${DIM}(equipos activos — host discovery)${R}"
+echo -e "     ${GRN}nmap -sn -n --min-rate ${MIN_RATE} -vvv ${TRAMA}${R}"
+echo
+echo -e "  ${B}${CYN}2.${R} ${DIM}(puertos abiertos de los equipos vivos)${R}"
+echo -e "     ${GRN}nmap -p- ${SCAN_TYPE} --min-rate ${MIN_RATE} --open -vvv -n -Pn -iL ${LIVE_FILE}${R}"
+echo
+echo -e "  ${B}${CYN}3.${R} ${DIM}(servicios y versiones sobre los puertos encontrados)${R}"
+echo -e "     ${GRN}nmap -p${B}<puertos>${R}${GRN} ${SCAN_TYPE} -sV --min-rate ${MIN_RATE} --open -vvv -n -Pn -iL ${LIVE_FILE} -oX ${OUT_XML}${R}"
+hr
+echo
+[[ -n "$ROOT_WARN" ]] && { warn "$ROOT_WARN"; echo; }
+
+if [[ "$ASSUME_YES" -ne 1 ]]; then
+    printf "  %b¿Ejecutar el escaneo?%b %b[y/N]%b " "$B" "$R" "$GREY" "$R"
+    read -r ans || true
+    case "${ans,,}" in y|yes|s|si) echo ;; *) echo; warn "Cancelado."; exit 0 ;; esac
+fi
+
+# ===========================================================================
+#  FASE 1 · Equipos activos
+# ===========================================================================
+D1="$TMP_DIR/discovery.gnmap"
+echo; hr
+title "Fase 1 · Equipos activos (host discovery)"
+hr
+echo -e "  ${GRN}\$ nmap -sn -n --min-rate ${MIN_RATE} -vvv ${TRAMA} -oG ${D1}${R}"
+echo
+nmap -sn -n --min-rate "${MIN_RATE}" -vvv "${TRAMA}" -oG "${D1}"
+
+# Extraer IPs "Up" -> fichero de activos
+grep -E 'Status: Up' "$D1" 2>/dev/null | awk '{print $2}' | sort -uV > "$LIVE_FILE" || true
+N_LIVE="$(wc -l < "$LIVE_FILE" | tr -d ' ')"
+echo
+if [[ "${N_LIVE:-0}" -eq 0 ]]; then
+    warn "No se han encontrado equipos activos en ${B}${TRAMA}${R}."
+    exit 0
+fi
+ok "Equipos activos: ${GRN}${B}${N_LIVE}${R}  ${GREY}(guardados en ${LIVE_FILE})${R}"
+
+# ===========================================================================
+#  FASE 2 · Puertos abiertos
+# ===========================================================================
+D2="$TMP_DIR/ports.gnmap"
+echo; hr
+title "Fase 2 · Puertos abiertos de los equipos vivos"
+hr
+echo -e "  ${GRN}\$ nmap -p- ${SCAN_TYPE} --min-rate ${MIN_RATE} --open -vvv -n -Pn -iL ${LIVE_FILE} -oG ${D2}${R}"
+echo
+nmap -p- ${SCAN_TYPE} --min-rate "${MIN_RATE}" --open -vvv -n -Pn -iL "${LIVE_FILE}" -oG "${D2}"
+
+# Union de todos los puertos abiertos encontrados
+PORTS="$(grep -oE '[0-9]+/open' "$D2" 2>/dev/null | cut -d/ -f1 | sort -un | paste -sd, - || true)"
+echo
+if [[ -z "$PORTS" ]]; then
+    warn "No se han encontrado puertos abiertos en los equipos activos."
+    exit 0
+fi
+ok "Puertos abiertos (union): ${GRN}${B}${PORTS}${R}"
+
+# ===========================================================================
+#  FASE 3 · Servicios y versiones (-sV)
+# ===========================================================================
+echo; hr
+title "Fase 3 · Servicios y versiones (-sV)"
+hr
+echo -e "  ${GRN}\$ nmap -p${PORTS} ${SCAN_TYPE} -sV --min-rate ${MIN_RATE} --open -vvv -n -Pn -iL ${LIVE_FILE} -oX ${OUT_XML}${R}"
+echo
+nmap -p"${PORTS}" ${SCAN_TYPE} -sV --min-rate "${MIN_RATE}" --open -vvv -n -Pn -iL "${LIVE_FILE}" -oX "${OUT_XML}"
+
+echo; hr
+title "Escaneo completado"
+hr
+ok "Equipos activos:  ${B}${N_LIVE}${R}  ${GREY}(${LIVE_FILE})${R}"
+ok "Puertos:          ${B}${PORTS}${R}"
+ok "XML generado:     ${GRN}${B}${OUT_XML}${R}"
+hr
+echo

@@ -25,12 +25,10 @@ warn() { echo -e "  ${YLW}!${R} $*"; }
 err()  { echo -e "${RED}✖${R} $*" >&2; }
 
 # --- Config ----------------------------------------------------------------
-BIN_NAME="simple-scan"
+BINS=(simple-scan trama-scan)
 PREFIX="${PREFIX:-/usr/local}"
 BIN_DIR="${PREFIX}/bin"
-DEST="${BIN_DIR}/${BIN_NAME}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SRC_DIR}/${BIN_NAME}"
 
 ACTION="${1:-install}"
 
@@ -60,40 +58,42 @@ ensure_nmap() {
 
 do_install() {
     echo
-    echo -e "${B}${BLU}Instalando ${BIN_NAME}${R}"
+    echo -e "${B}${BLU}Instalando ${BINS[*]}${R}"
     echo -e "${GREY}────────────────────────────────────────────${R}"
     require_root
-
-    [[ -f "$SRC" ]] || { err "No encuentro el script fuente: ${B}${SRC}${R}"; exit 1; }
-
     ensure_nmap
-
     install -d "$BIN_DIR"
-    install -m 0755 "$SRC" "$DEST"
-    ok "Instalado en ${B}${DEST}${R}"
 
-    if command -v "$BIN_NAME" >/dev/null 2>&1; then
-        ok "Disponible en el PATH: ${B}$(command -v "$BIN_NAME")${R}"
+    local bin src
+    for bin in "${BINS[@]}"; do
+        src="${SRC_DIR}/${bin}"
+        [[ -f "$src" ]] || { err "No encuentro el script fuente: ${B}${src}${R}"; exit 1; }
+        install -m 0755 "$src" "${BIN_DIR}/${bin}"
+        ok "Instalado ${B}${BIN_DIR}/${bin}${R}"
+    done
+
+    if command -v "${BINS[0]}" >/dev/null 2>&1; then
+        ok "Disponibles en el PATH: ${B}${BINS[*]}${R}"
     else
         warn "${BIN_DIR} no parece estar en tu PATH. Anade:  export PATH=\"${BIN_DIR}:\$PATH\""
     fi
 
     echo -e "${GREY}────────────────────────────────────────────${R}"
-    ok "${B}Listo.${R} Prueba:  ${B}${BIN_NAME} --help${R}"
+    ok "${B}Listo.${R} Prueba:  ${B}${BINS[0]} --help${R}  ·  ${B}${BINS[1]} --help${R}"
     echo
 }
 
 do_uninstall() {
     echo
-    echo -e "${B}${BLU}Desinstalando ${BIN_NAME}${R}"
+    echo -e "${B}${BLU}Desinstalando ${BINS[*]}${R}"
     echo -e "${GREY}────────────────────────────────────────────${R}"
     require_root
-    if [[ -e "$DEST" ]]; then
-        rm -f "$DEST"
-        ok "Eliminado ${B}${DEST}${R}"
-    else
-        warn "No estaba instalado en ${DEST}."
-    fi
+    local bin dest
+    for bin in "${BINS[@]}"; do
+        dest="${BIN_DIR}/${bin}"
+        if [[ -e "$dest" ]]; then rm -f "$dest"; ok "Eliminado ${B}${dest}${R}"
+        else warn "No estaba instalado: ${dest}"; fi
+    done
     info "nmap NO se desinstala (puede que lo uses para otras cosas)."
     echo
 }

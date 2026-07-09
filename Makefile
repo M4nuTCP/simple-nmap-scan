@@ -3,16 +3,14 @@
 
 PREFIX ?= /usr/local
 BINDIR := $(PREFIX)/bin
-BIN    := simple-scan
+BINS   := simple-scan trama-scan
 
 .PHONY: install uninstall
 
 install:
 	@command -v nmap >/dev/null 2>&1 || { echo "nmap no instalado: sudo apt install nmap"; exit 1; }
 	install -d $(DESTDIR)$(BINDIR)
-	install -m 0755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
-	@echo "Instalado en $(DESTDIR)$(BINDIR)/$(BIN)"
+	for b in $(BINS); do install -m 0755 $$b $(DESTDIR)$(BINDIR)/$$b; echo "Instalado $(DESTDIR)$(BINDIR)/$$b"; done
 
 uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
-	@echo "Eliminado $(DESTDIR)$(BINDIR)/$(BIN)"
+	for b in $(BINS); do rm -f $(DESTDIR)$(BINDIR)/$$b; echo "Eliminado $(DESTDIR)$(BINDIR)/$$b"; done
