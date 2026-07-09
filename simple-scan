@@ -321,15 +321,16 @@ do_check() {
 
     # ---- Elegir objetivo de sondeo -------------------------------------
     local probe="" src_desc="" first=""
-    if [[ -n "$IP_LIST" && -f "$IP_LIST" ]]; then
+    if [[ -n "$TRAMA" ]]; then
+        probe="$(reduce_to_ip "$TRAMA")"                 # primer host de la trama
+        src_desc="trama ${TRAMA} (via ${probe})"
+    elif [[ -n "$IP_LIST" && -f "$IP_LIST" ]]; then
         first="$(sed 's/#.*//' "$IP_LIST" | awk '{$1=$1};1' | grep -v '^$' | head -1 || true)"
-        [[ -n "$first" ]] && probe="$(reduce_to_ip "$first")"
+        [[ -n "$first" ]] && { probe="$(reduce_to_ip "$first")"; src_desc="primer objetivo de ${IP_LIST}"; }
     fi
-    if [[ -n "$probe" ]]; then
-        src_desc="primer objetivo de ${IP_LIST}"
-    else
+    if [[ -z "$probe" ]]; then
         probe="$(default_gateway)"
-        src_desc="gateway por defecto (no se dio -l)"
+        src_desc="gateway por defecto (sin -l/-t)"
     fi
     if [[ -z "$probe" ]]; then
         err "No pude determinar un objetivo para el sondeo (ni -l ni gateway)."
@@ -387,11 +388,11 @@ do_check() {
     offer_recommended_run "$rec"
 }
 
-# Tras un --check con -l: ofrece lanzar el escaneo con el perfil recomendado,
-# preguntando el nombre del XML. Si acepta, re-ejecuta simple-scan.
+# Tras un --check con -l o -t: ofrece lanzar el escaneo con el perfil
+# recomendado, preguntando el nombre del XML. Si acepta, re-ejecuta simple-scan.
 offer_recommended_run() {
     local rec="$1"
-    [[ -z "$IP_LIST" ]] && return 0            # solo tiene sentido con una lista
+    [[ -z "$IP_LIST" && -z "$TRAMA" ]] && return 0    # necesita lista o trama
     local rc; rc="$(color_for_profile "$rec")"
     printf "  %b¿Ejecutar el escaneo recomendado%b (%b-p %s%b)? %b[y/N]%b " \
         "$B" "$R" "$rc" "$rec" "$R" "$GREY" "$R"
@@ -401,18 +402,19 @@ offer_recommended_run() {
         *) echo; warn "De acuerdo, no ejecuto nada."; echo; return 0 ;;
     esac
 
-    # Nombre del XML de salida (con un valor por defecto derivado de la lista)
+    # Nombre del XML de salida (valor por defecto segun trama o lista)
     local base def name
-    base="$(basename "$IP_LIST")"; base="${base%.*}"
-    def="${base:-scan}.xml"
+    if [[ -n "$TRAMA" ]]; then def="trama_${TRAMA%%/*}.xml"
+    else base="$(basename "$IP_LIST")"; def="${base%.*}.xml"; fi
     printf "  %bNombre del XML de salida%b %b[%s]%b: " "$B" "$R" "$GREY" "$def" "$R"
     read -r name || true
     [[ -z "$name" ]] && name="$def"
     [[ "$name" != *.xml ]] && name="${name}.xml"
     echo
 
-    # Re-ejecutar el propio simple-scan ya en modo escaneo (con -y, ya confirmado)
-    exec "$0" -l "$IP_LIST" -o "$name" -p "$rec" -y
+    # Re-ejecutar simple-scan en modo escaneo (con -y, ya confirmado)
+    if [[ -n "$TRAMA" ]]; then exec "$0" -t "$TRAMA" -o "$name" -p "$rec" -y
+    else exec "$0" -l "$IP_LIST" -o "$name" -p "$rec" -y; fi
 }
 
 # Imprime el informe + recomendacion.
@@ -443,7 +445,7 @@ _check_report() {
     [[ -n "$reason" ]] && echo -e "  ${DIM}(${reason}. 'agresivo' nunca es automatico.)${R}"
     hr
     echo
-    if [[ -z "$IP_LIST" ]]; then
+    if [[ -z "$IP_LIST" && -z "$TRAMA" ]]; then
         echo -e "  ${DIM}Para lanzar el escaneo con esa recomendacion:${R}"
         echo -e "  ${GRN}\$ simple-scan -l ips.txt -o out.xml -p ${rec}${R}"
         hr
@@ -461,7 +463,8 @@ usage() {
 ${B}USO${R}
   simple-scan -l <ips.txt> -o <salida.xml> [-p <perfil>] [-y]
   simple-scan -t <CIDR> [-o <salida.xml>]     # trama: descubre equipos activos
-  simple-scan --check -l <ips.txt>            # mide la red y recomienda perfil
+  simple-scan --check -l <ips.txt>            # mide estabilidad y recomienda perfil
+  simple-scan --check -t <CIDR>               # mide la estabilidad de una trama
 
 ${B}PARAMETROS${R}
   -l, --list      Fichero .txt con una IP (o rango) por linea.

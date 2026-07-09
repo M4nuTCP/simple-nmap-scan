@@ -63,8 +63,13 @@ Antes de escanear, `--check` sondea la red (2 ráfagas de ping, no intrusivo) y
 **recomienda un perfil**, con **fuerte sesgo de seguridad** para no tumbar redes.
 
 ```bash
-simple-scan --check -l ips.txt
+simple-scan --check -l ips.txt          # estabilidad hacia una lista
+simple-scan --check -t 172.16.12.0/24   # estabilidad de una trama concreta
 ```
+
+Con `-t` sondea el primer host de la trama (su gateway de segmento), así ves la
+estabilidad del camino a esa red antes de escanearla; si aceptas, encadena con
+el escaneo de la trama.
 
 **Reproducible entre máquinas.** La decisión de seguridad se basa en señales
 **intrínsecas de la red** (pérdida de paquetes, VPN, inestabilidad entre ráfagas),
