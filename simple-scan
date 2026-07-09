@@ -116,7 +116,7 @@ do_update() {
 # ===========================================================================
 #  Perfiles  (flags de AJUSTE que se anaden a los comandos base de nmap)
 #  Base fase 1:  nmap -p- --open -sS -vvv -n -Pn <ip> -oG <f>
-#  Base fase 2:  nmap -sCV -p<puertos> -vvv -n -Pn <ip> -oX <f>
+#  Base fase 2:  nmap -sV -p<puertos> -vvv -n -Pn <ip> -oX <f>
 #
 #  Claves de diseno:
 #   - El techo real de carga lo pone --max-rate en TODOS los perfiles.
@@ -578,7 +578,7 @@ SFLAGS="${SERV_FLAGS[$PROFILE]}"
 
 # Plantillas mostradas al usuario (con marcadores legibles)
 CMD1_PREVIEW="nmap -iL ${B}<lista>${R} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG <tmp.gnmap>"
-CMD2_PREVIEW="nmap -sCV -p${B}<puertos>${R} ${SFLAGS} -vvv -n -Pn ${B}<ips_con_esos_puertos>${R} -oX <tmp.xml>"
+CMD2_PREVIEW="nmap -sV -p${B}<puertos>${R} ${SFLAGS} -vvv -n -Pn ${B}<ips_con_esos_puertos>${R} -oX <tmp.xml>"
 
 banner
 echo
@@ -721,10 +721,10 @@ for ports in "${!GROUP_TARGETS[@]}"; do
     title "Fase $(( TRAMA_MODE + 2 )) · Grupo ${GI}/${#GROUP_TARGETS[@]}  ·  puertos ${PCOL}${ports}${R}  ·  ${n_ips} IP(s)"
     hr
     info "IPs: ${GREY}${targets}${R}"
-    echo -e "  ${GRN}\$ nmap -sCV -p${ports} ${SFLAGS} -vvv -n -Pn ${targets} -oX ${X_SCAN}${R}"
+    echo -e "  ${GRN}\$ nmap -sV -p${ports} ${SFLAGS} -vvv -n -Pn ${targets} -oX ${X_SCAN}${R}"
     echo
     set +e
-    nmap -sCV -p"${ports}" ${SFLAGS} -vvv -n -Pn ${targets} -oX "$X_SCAN"
+    nmap -sV -p"${ports}" ${SFLAGS} -vvv -n -Pn ${targets} -oX "$X_SCAN"
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
