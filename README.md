@@ -9,50 +9,42 @@ la lista en una sola pasada** dejando que nmap paralelice entre hosts, y la
 fase 2 (servicios/versiones) agrupa las IPs por puertos y lanza un escaneo por
 grupo — no una ejecución por IP.
 
-Incluye dos binarios:
-
-- **`simple-scan`** — escanea una **lista de IPs** (`.txt`) con perfiles y `--check`.
-- **`trama-scan`** — escanea una **trama/CIDR** entera en 3 fases: equipos
-  activos → puertos → servicios (`-sV`).
-
 ## Instalación (Debian/Ubuntu)
 
 ```bash
-sudo ./setup            # instala simple-scan y trama-scan en /usr/local/bin
-sudo ./setup uninstall  # los elimina
+sudo ./setup            # instala en /usr/local/bin y comprueba nmap
+sudo ./setup uninstall  # lo elimina
 ```
-
-## trama-scan (una trama/CIDR)
-
-Parte de una red y descubre todo automáticamente:
-
-```bash
-sudo trama-scan 172.16.12.0/24
-```
-
-1. **Equipos activos** (`nmap -sn`) → guarda los vivos en `ips_trama_<red>.txt`.
-2. **Puertos** (`nmap -p- -sS --open`) sobre los equipos vivos.
-3. **Servicios/versiones** (`nmap -sV`) sobre los puertos encontrados →
-   `trama_<red>.xml`.
-
-Muestra los 3 comandos, pide confirmación y los ejecuta con triple verbose.
-Opciones: `-o <xml>`, `-r <min-rate>` (def. 3000), `-y`.
 
 ## Uso
 
 ```bash
 simple-scan --check -l ips.txt              # 1) mide la red y recomienda perfil
-simple-scan -l ips.txt -o out.xml -p medio  # 2) escanea
+simple-scan -l ips.txt -o out.xml -p medio  # 2) escanea una lista
+sudo simple-scan -t 172.16.12.0/24          # escanea una trama/CIDR entera
 ```
 
 | Parámetro         | Descripción                                                        |
 |-------------------|-------------------------------------------------------------------|
 | `-l`, `--list`    | Fichero `.txt` con una IP (o rango) por línea.                    |
-| `-o`, `--output`  | Nombre del XML de salida.                                         |
+| `-t`, `--trama`   | Trama/CIDR (p.ej. `172.16.12.0/24`): descubre equipos activos primero. |
+| `-o`, `--output`  | Nombre del XML de salida (en `-t`, por defecto `trama_<red>.xml`). |
 | `-p`, `--profile` | `superbajo` \| `bajo` \| `medio` \| `alto` \| `agresivo` (def. `medio`). |
 | `-y`, `--yes`     | Ejecuta sin pedir confirmación.                                  |
 | `--check`         | Mide la estabilidad de la red y recomienda un perfil.            |
 | `--update`        | Descarga la última versión y la reinstala.                       |
+
+### Trama/CIDR (`-t`)
+
+Con `-t` parte de una red entera y añade una fase previa de **equipos activos**:
+
+```bash
+sudo simple-scan -t 172.16.12.0/24
+```
+
+1. **Equipos activos** (`nmap -sn`) → guarda los vivos en `ips_trama_<red>.txt`.
+2. **Puertos** sobre los equipos vivos (una sola pasada, con el perfil elegido).
+3. **Servicios/versiones** (`-sCV`) por grupo de puertos → `trama_<red>.xml`.
 
 Al lanzarlo muestra los dos comandos de nmap que se van a ejecutar y pregunta
 `¿Ejecutar el escaneo? [y/N]`. Con `y` arranca.

@@ -25,7 +25,7 @@ warn() { echo -e "  ${YLW}!${R} $*"; }
 err()  { echo -e "${RED}✖${R} $*" >&2; }
 
 # --- Config ----------------------------------------------------------------
-BINS=(simple-scan trama-scan)
+BINS=(simple-scan)
 PREFIX="${PREFIX:-/usr/local}"
 BIN_DIR="${PREFIX}/bin"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,7 +79,7 @@ do_install() {
     fi
 
     echo -e "${GREY}────────────────────────────────────────────${R}"
-    ok "${B}Listo.${R} Prueba:  ${B}${BINS[0]} --help${R}  ·  ${B}${BINS[1]} --help${R}"
+    ok "${B}Listo.${R} Prueba:  ${B}${BINS[0]} --help${R}"
     echo
 }
 

@@ -442,11 +442,14 @@ usage() {
 
 ${B}USO${R}
   simple-scan -l <ips.txt> -o <salida.xml> [-p <perfil>] [-y]
+  simple-scan -t <CIDR> [-o <salida.xml>]     # trama: descubre equipos activos
   simple-scan --check -l <ips.txt>            # mide la red y recomienda perfil
 
 ${B}PARAMETROS${R}
   -l, --list      Fichero .txt con una IP (o rango) por linea.
-  -o, --output    Nombre del fichero XML de salida.
+  -t, --trama     Trama/CIDR (p.ej. 172.16.12.0/24): descubre equipos activos
+                  y luego escanea puertos y servicios.
+  -o, --output    Nombre del fichero XML de salida (en -t, def: trama_<red>.xml).
   -p, --profile   Perfil: superbajo | bajo | medio | alto | agresivo  (def: medio)
   -y, --yes       No preguntar confirmacion, ejecutar directamente.
       --check     Comprobar estabilidad de la red y recomendar un perfil.
@@ -462,8 +465,9 @@ ${B}PERFILES${R}  ${GREY}(mas seguro/lento  ->  mas rapido)${R}
   ${RED}agresivo${R}   ${PROFILE_DESC[agresivo]}  ${GREY}[${PROFILE_RATE[agresivo]}]${R}
 
 ${B}EJEMPLO${R}
-  simple-scan --check -l ips.txt              # 1) ver que perfil conviene
-  simple-scan -l ips.txt -o out.xml -p medio  # 2) escanear
+  simple-scan --check -l ips.txt                 # 1) ver que perfil conviene
+  simple-scan -l ips.txt -o out.xml -p medio     # 2) escanear una lista
+  sudo simple-scan -t 172.16.12.0/24             # escanear una trama entera
 EOF
     echo
 }
@@ -471,12 +475,13 @@ EOF
 # ===========================================================================
 #  Parseo de argumentos
 # ===========================================================================
-IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0; DO_CHECK=0
+IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0; DO_CHECK=0; TRAMA=""
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -l|--list)    IP_LIST="${2:-}"; shift 2 ;;
+        -t|--trama)   TRAMA="${2:-}"; shift 2 ;;
         -o|--output)  OUT_XML="${2:-}"; shift 2 ;;
         -p|--profile) PROFILE="${2:-}"; shift 2 ;;
         -y|--yes)     ASSUME_YES=1; shift ;;
@@ -489,7 +494,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$IP_LIST" && ${#POSITIONAL[@]} -ge 1 ]] && IP_LIST="${POSITIONAL[0]}"
+# Posicional: si parece un CIDR es trama; si no, lista de IPs.
+if [[ -z "$IP_LIST" && -z "$TRAMA" && ${#POSITIONAL[@]} -ge 1 ]]; then
+    if [[ "${POSITIONAL[0]}" == */* ]]; then TRAMA="${POSITIONAL[0]}"; else IP_LIST="${POSITIONAL[0]}"; fi
+fi
 [[ -z "$OUT_XML" && ${#POSITIONAL[@]} -ge 2 ]] && OUT_XML="${POSITIONAL[1]}"
 
 # --check: mide estabilidad y recomienda perfil (no requiere -o)
@@ -498,8 +506,20 @@ done
 # ===========================================================================
 #  Validaciones
 # ===========================================================================
-[[ -z "$IP_LIST" || -z "$OUT_XML" ]] && { err "Faltan parametros (-l y -o son obligatorios)."; echo "Prueba: simple-scan --help" >&2; exit 1; }
-[[ ! -f "$IP_LIST" ]] && { err "No existe el fichero de IPs: ${B}${IP_LIST}${R}"; exit 1; }
+TRAMA_MODE=0
+if [[ -n "$TRAMA" ]]; then
+    TRAMA_MODE=1
+    if [[ ! "$TRAMA" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]; then
+        err "Trama invalida: ${B}${TRAMA}${R}. Formato esperado: ${B}172.16.12.0/24${R}"; exit 1
+    fi
+    TRAMA_BASE="${TRAMA%%/*}"
+    IP_LIST="ips_trama_${TRAMA_BASE}.txt"          # se generara en la fase de descubrimiento
+    [[ -z "$OUT_XML" ]] && OUT_XML="trama_${TRAMA_BASE}.xml"
+else
+    [[ -z "$IP_LIST" ]] && { err "Falta objetivo: usa ${B}-l <ips.txt>${R} o ${B}-t <CIDR>${R}."; echo "Prueba: simple-scan --help" >&2; exit 1; }
+    [[ ! -f "$IP_LIST" ]] && { err "No existe el fichero de IPs: ${B}${IP_LIST}${R}"; exit 1; }
+fi
+[[ -z "$OUT_XML" ]] && { err "Falta el fichero de salida (-o)."; echo "Prueba: simple-scan --help" >&2; exit 1; }
 
 if [[ -z "${DISC_FLAGS[$PROFILE]:-}" ]]; then
     err "Perfil desconocido: ${B}${PROFILE}${R}"
@@ -539,9 +559,13 @@ TMP_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
-# Cargar objetivos (ignora vacias y comentarios #)
-mapfile -t TARGETS < <(sed 's/#.*//' "$IP_LIST" | awk '{$1=$1};1' | grep -v '^$')
-[[ ${#TARGETS[@]} -eq 0 ]] && { err "El fichero ${B}${IP_LIST}${R} no contiene IPs validas."; exit 1; }
+# Cargar objetivos ahora (modo lista). En modo trama se cargan tras descubrir
+# los equipos activos (justo despues de la confirmacion).
+TARGETS=()
+if [[ "$TRAMA_MODE" -eq 0 ]]; then
+    mapfile -t TARGETS < <(sed 's/#.*//' "$IP_LIST" | awk '{$1=$1};1' | grep -v '^$')
+    [[ ${#TARGETS[@]} -eq 0 ]] && { err "El fichero ${B}${IP_LIST}${R} no contiene IPs validas."; exit 1; }
+fi
 
 # Color del perfil para la UI
 PCOL="$(color_for_profile "$PROFILE")"
@@ -563,16 +587,30 @@ hr
 field "Perfil"    "${PCOL}${B}${PROFILE}${R}  ${GREY}${PROFILE_DESC[$PROFILE]}${R}"
 field "Tasa"      "${B}${PROFILE_RATE[$PROFILE]}${R}  ${GREY}(techo con --max-rate)${R}"
 field "Escaneo"   "${B}${SCAN_DESC}${R}"
-field "Objetivos" "${B}${#TARGETS[@]}${R}  ${GREY}(desde ${IP_LIST})${R}"
+if [[ "$TRAMA_MODE" -eq 1 ]]; then
+    field "Trama"    "${B}${TRAMA}${R}  ${GREY}(se descubriran los equipos activos)${R}"
+    field "Activos"  "${B}${IP_LIST}${R}"
+else
+    field "Objetivos" "${B}${#TARGETS[@]}${R}  ${GREY}(desde ${IP_LIST})${R}"
+fi
 field "Salida"    "${B}${OUT_XML}${R}"
 hr
 echo
 title "Comandos que se ejecutaran"
 hr
-echo -e "  ${B}${CYN}1.${R} ${DIM}(descubrimiento — TODAS las IPs en una sola pasada)${R}"
+N=0
+if [[ "$TRAMA_MODE" -eq 1 ]]; then
+    N=$((N+1))
+    echo -e "  ${B}${CYN}${N}.${R} ${DIM}(equipos activos — host discovery de la trama)${R}"
+    echo -e "     ${GRN}nmap -sn -n -vvv ${TRAMA} -oG <tmp>  →  ${IP_LIST}${R}"
+    echo
+fi
+N=$((N+1))
+echo -e "  ${B}${CYN}${N}.${R} ${DIM}(descubrimiento de puertos — TODAS las IPs en una sola pasada)${R}"
 echo -e "     ${GRN}${CMD1_PREVIEW}${R}"
 echo
-echo -e "  ${B}${CYN}2.${R} ${DIM}(servicios y versiones — un escaneo por grupo de puertos)${R}"
+N=$((N+1))
+echo -e "  ${B}${CYN}${N}.${R} ${DIM}(servicios y versiones — un escaneo por grupo de puertos)${R}"
 echo -e "     ${GRN}${CMD2_PREVIEW}${R}"
 hr
 echo
@@ -606,6 +644,26 @@ fi
 # ===========================================================================
 XML_PARTS=(); START_TS="$(date +%s 2>/dev/null || echo 0)"
 
+# ---- FASE 0 (solo modo trama): equipos activos ---------------------------
+if [[ "$TRAMA_MODE" -eq 1 ]]; then
+    HOST_GNMAP="$TMP_DIR/hosts.gnmap"
+    echo
+    hr
+    title "Fase 1 · Equipos activos — host discovery de ${TRAMA}"
+    hr
+    echo -e "  ${GRN}\$ nmap -sn -n -vvv ${TRAMA} -oG ${HOST_GNMAP}${R}"
+    echo
+    nmap -sn -n -vvv "${TRAMA}" -oG "${HOST_GNMAP}"
+    grep -E 'Status: Up' "$HOST_GNMAP" 2>/dev/null | awk '{print $2}' | sort -uV > "$IP_LIST" || true
+    mapfile -t TARGETS < "$IP_LIST"
+    echo
+    if [[ ${#TARGETS[@]} -eq 0 ]]; then
+        warn "No se han encontrado equipos activos en ${B}${TRAMA}${R}."
+        exit 0
+    fi
+    ok "Equipos activos: ${GRN}${B}${#TARGETS[@]}${R}  ${GREY}(guardados en ${IP_LIST})${R}"
+fi
+
 TARGET_FILE="$TMP_DIR/targets.lst"
 printf '%s\n' "${TARGETS[@]}" > "$TARGET_FILE"
 DISC_GNMAP="$TMP_DIR/discovery.gnmap"
@@ -613,7 +671,7 @@ DISC_GNMAP="$TMP_DIR/discovery.gnmap"
 # ---- FASE 1: descubrimiento de TODAS las IPs en una pasada ---------------
 echo
 hr
-title "Fase 1 · Descubrimiento de puertos — ${#TARGETS[@]} IPs en una sola pasada"
+title "Fase $(( TRAMA_MODE + 1 )) · Descubrimiento de puertos — ${#TARGETS[@]} IPs en una sola pasada"
 hr
 echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
 echo
@@ -660,7 +718,7 @@ for ports in "${!GROUP_TARGETS[@]}"; do
 
     echo
     hr
-    title "Fase 2 · Grupo ${GI}/${#GROUP_TARGETS[@]}  ·  puertos ${PCOL}${ports}${R}  ·  ${n_ips} IP(s)"
+    title "Fase $(( TRAMA_MODE + 2 )) · Grupo ${GI}/${#GROUP_TARGETS[@]}  ·  puertos ${PCOL}${ports}${R}  ·  ${n_ips} IP(s)"
     hr
     info "IPs: ${GREY}${targets}${R}"
     echo -e "  ${GRN}\$ nmap -sCV -p${ports} ${SFLAGS} -vvv -n -Pn ${targets} -oX ${X_SCAN}${R}"

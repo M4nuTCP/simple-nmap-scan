@@ -3,7 +3,7 @@
 
 PREFIX ?= /usr/local
 BINDIR := $(PREFIX)/bin
-BINS   := simple-scan trama-scan
+BINS   := simple-scan
 
 .PHONY: install uninstall
 
