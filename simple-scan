@@ -474,6 +474,7 @@ ${B}PARAMETROS${R}
   -p, --profile   Perfil: superbajo | bajo | medio | alto | agresivo  (def: medio)
   -y, --yes       No preguntar confirmacion, ejecutar directamente.
       --check     Comprobar estabilidad de la red y recomendar un perfil.
+      --resume    Reanudar un escaneo interrumpido (mismos -l/-t y -o).
       --update    Descargar la ultima version y reinstalarla.
   -h, --help      Esta ayuda.
       --version   Version.
@@ -496,7 +497,7 @@ EOF
 # ===========================================================================
 #  Parseo de argumentos
 # ===========================================================================
-IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0; DO_CHECK=0; TRAMA=""
+IP_LIST=""; OUT_XML=""; PROFILE="medio"; ASSUME_YES=0; DO_CHECK=0; TRAMA=""; RESUME=0
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -507,6 +508,7 @@ while [[ $# -gt 0 ]]; do
         -p|--profile) PROFILE="${2:-}"; shift 2 ;;
         -y|--yes)     ASSUME_YES=1; shift ;;
         --check)      DO_CHECK=1; shift ;;
+        --resume)     RESUME=1; shift ;;
         --update)     do_update; exit $? ;;
         -h|--help)    usage; exit 0 ;;
         --version)    echo "simple-scan v${VERSION}"; exit 0 ;;
@@ -575,10 +577,36 @@ else
     ROOT_WARN="Sin privilegios para SYN scan: ${B}-sS${R} necesita root (o nmap con cap_net_raw) y no se incluira. Se usara ${B}-sT${R} (connect scan), que funciona sin sudo pero es mas lento y ruidoso. Para el escaneo optimo: ${B}sudo simple-scan ...${R}"
 fi
 
-# Directorio temporal
-TMP_DIR="$(mktemp -d)"
-cleanup() { rm -rf "$TMP_DIR"; }
+# Directorio de trabajo PERSISTENTE (para poder reanudar con --resume).
+# Se deriva del XML de salida y NO se borra si se interrumpe el escaneo.
+TMP_DIR="$(dirname "$OUT_XML")/.simple-scan-$(basename "${OUT_XML%.xml}")"
+if [[ "$RESUME" -eq 1 && -d "$TMP_DIR" ]]; then
+    :   # reanudar: conservar lo que haya
+else
+    rm -rf "$TMP_DIR" 2>/dev/null || true
+    mkdir -p "$TMP_DIR"
+fi
+
+# Comando para reanudar (se muestra al interrumpir)
+if [[ "$TRAMA_MODE" -eq 1 ]]; then
+    RESUME_CMD="simple-scan -t ${TRAMA} -o ${OUT_XML} -p ${PROFILE} --resume"
+else
+    RESUME_CMD="simple-scan -l ${IP_LIST} -o ${OUT_XML} -p ${PROFILE} --resume"
+fi
+[[ "${EUID:-$(id -u)}" -eq 0 ]] && RESUME_CMD="sudo ${RESUME_CMD}"
+
+SCAN_DONE=0
+cleanup() { [[ "$SCAN_DONE" -eq 1 ]] && rm -rf "$TMP_DIR"; }   # solo limpia si termino bien
 trap cleanup EXIT
+on_interrupt() {
+    echo; echo
+    warn "Escaneo interrumpido. Progreso guardado en ${B}${TMP_DIR}${R}"
+    warn "Reanuda donde ibas con:"
+    echo -e "  ${GRN}\$ ${RESUME_CMD}${R}"
+    echo
+    exit 130
+}
+trap on_interrupt INT TERM
 
 # Cargar objetivos ahora (modo lista). En modo trama se cargan tras descubrir
 # los equipos activos (justo despues de la confirmacion).
@@ -665,6 +693,11 @@ fi
 # ===========================================================================
 XML_PARTS=(); START_TS="$(date +%s 2>/dev/null || echo 0)"
 
+# Aviso proactivo: si se corta, se puede reanudar (el trap de Ctrl+C no siempre
+# llega a imprimirse, pero el progreso queda guardado en el dir de trabajo).
+info "Si se interrumpe (Ctrl+C), el progreso se guarda. Reanuda con:"
+echo -e "  ${GRN}\$ ${RESUME_CMD}${R}"
+
 # ---- FASE 0 (solo modo trama): equipos activos ---------------------------
 if [[ "$TRAMA_MODE" -eq 1 ]]; then
     HOST_GNMAP="$TMP_DIR/hosts.gnmap"
@@ -672,17 +705,21 @@ if [[ "$TRAMA_MODE" -eq 1 ]]; then
     hr
     title "Fase 1 · Equipos activos — host discovery de ${TRAMA}"
     hr
-    echo -e "  ${GRN}\$ nmap -sn -n -vvv ${TRAMA} -oG ${HOST_GNMAP}${R}"
-    echo
-    nmap -sn -n -vvv "${TRAMA}" -oG "${HOST_GNMAP}"
-    grep -E 'Status: Up' "$HOST_GNMAP" 2>/dev/null | awk '{print $2}' | sort -uV > "$IP_LIST" || true
+    if [[ "$RESUME" -eq 1 && -s "$HOST_GNMAP" && -s "$IP_LIST" ]]; then
+        ok "Reanudado: reutilizo los equipos activos ya descubiertos."
+    else
+        echo -e "  ${GRN}\$ nmap -sn -n -vvv ${TRAMA} -oG ${HOST_GNMAP}${R}"
+        echo
+        nmap -sn -n -vvv "${TRAMA}" -oG "${HOST_GNMAP}"
+        grep -E 'Status: Up' "$HOST_GNMAP" 2>/dev/null | awk '{print $2}' | sort -uV > "$IP_LIST" || true
+    fi
     mapfile -t TARGETS < "$IP_LIST"
     echo
     if [[ ${#TARGETS[@]} -eq 0 ]]; then
         warn "No se han encontrado equipos activos en ${B}${TRAMA}${R}."
         exit 0
     fi
-    ok "Equipos activos: ${GRN}${B}${#TARGETS[@]}${R}  ${GREY}(guardados en ${IP_LIST})${R}"
+    ok "Equipos activos: ${GRN}${B}${#TARGETS[@]}${R}  ${GREY}(en ${IP_LIST})${R}"
 fi
 
 TARGET_FILE="$TMP_DIR/targets.lst"
@@ -694,12 +731,17 @@ echo
 hr
 title "Fase $(( TRAMA_MODE + 1 )) · Descubrimiento de puertos — ${#TARGETS[@]} IPs en una sola pasada"
 hr
-echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
-echo
-set +e
-nmap -iL "$TARGET_FILE" -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG "$DISC_GNMAP"
-NMAP_RC=$?
-set -e
+if [[ "$RESUME" -eq 1 && -s "$DISC_GNMAP" ]]; then
+    ok "Reanudado: reutilizo el descubrimiento de puertos ya hecho."
+    NMAP_RC=0
+else
+    echo -e "  ${GRN}\$ nmap -iL ${TARGET_FILE} -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG ${DISC_GNMAP}${R}"
+    echo
+    set +e
+    nmap -iL "$TARGET_FILE" -p- --open ${SCAN_TYPE} ${DFLAGS} -vvv -n -Pn -oG "$DISC_GNMAP"
+    NMAP_RC=$?
+    set -e
+fi
 if [[ $NMAP_RC -ne 0 ]]; then
     echo
     hr
@@ -735,12 +777,19 @@ for ports in "${!GROUP_TARGETS[@]}"; do
     GI=$((GI + 1))
     targets="${GROUP_TARGETS[$ports]}"; targets="${targets% }"   # quitar espacio final
     n_ips="$(wc -w <<<"$targets")"
-    X_SCAN="$TMP_DIR/serv_${GI}.xml"
+    # Nombre estable por conjunto de puertos+IPs (hash), para poder reanudar.
+    KEY="$(printf '%s|%s' "$ports" "$targets" | cksum | awk '{print $1}')"
+    X_SCAN="$TMP_DIR/serv_${KEY}.xml"
 
     echo
     hr
     title "Fase $(( TRAMA_MODE + 2 )) · Grupo ${GI}/${#GROUP_TARGETS[@]}  ·  puertos ${PCOL}${ports}${R}  ·  ${n_ips} IP(s)"
     hr
+    # Ya hecho en un intento anterior -> reutilizar y saltar
+    if [[ "$RESUME" -eq 1 && -s "$X_SCAN" ]]; then
+        ok "Grupo ya completado (reanudado): lo reutilizo."
+        XML_PARTS+=("$X_SCAN"); continue
+    fi
     info "IPs: ${GREY}${targets}${R}"
     echo -e "  ${GRN}\$ nmap -sV -p${ports} ${SFLAGS} -vvv -n -Pn ${targets} -oX ${X_SCAN}${R}"
     echo
@@ -780,6 +829,8 @@ FIRST="${XML_PARTS[0]}"; LAST="${XML_PARTS[${#XML_PARTS[@]}-1]}"
 
 END_TS="$(date +%s 2>/dev/null || echo 0)"
 ELAPSED=$(( END_TS - START_TS ))
+
+SCAN_DONE=1   # termino bien: el trap de EXIT ya puede limpiar el dir de trabajo
 
 title "Escaneo completado"
 hr
