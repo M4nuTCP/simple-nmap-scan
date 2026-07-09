@@ -13,7 +13,7 @@
 #
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # Origen para --update (se puede sobreescribir por entorno).
 # HEAD = rama por defecto del repo (funciona sea main, master o la que sea).
